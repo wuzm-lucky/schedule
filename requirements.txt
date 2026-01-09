@@ -1,0 +1,8 @@
+	fastapi
+	uvicorn
+	apscheduler
+	sqlalchemy
+	pymysql
+	python-dotenv
+	cryptography
+	dotenv
