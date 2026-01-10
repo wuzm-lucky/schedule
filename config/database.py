@@ -6,11 +6,15 @@ import os
 
 # 为了在直接运行 main.py 时能找到 config，我们将项目根目录加入 Python 路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import settings
+from config import get_settings
+
+settings = get_settings()
 
 # 创建引擎
+DATABASE_URI = f"mysql+pymysql://{settings.MYSQL_USER}:{settings.MYSQL_PASSWORD}@{settings.MYSQL_HOST}:{settings.MYSQL_PORT}/{settings.MYSQL_DATABASE}"
+print(DATABASE_URI)
 engine = create_engine(
-    settings.SQLALCHEMY_DATABASE_URI,
+    DATABASE_URI,
     pool_pre_ping=True,
     echo=False
 )

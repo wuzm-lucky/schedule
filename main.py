@@ -1,46 +1,45 @@
+"""
+Schedule 主入口
+"""
 import os
+import logging
 import sys
-from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+# 添加项目根目录到 Python 路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, current_dir)
 
-# 确保 app 包能被找到
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from app.api.routes import router
-from app.scheduler.manager import scheduler
-from app.database import engine, Base
-from config import settings
+import uvicorn
+from src.app import create_app
+from config import setup_logger, get_settings, load_config_file
 
 
-# --- 1. 定义 lifespan 上下文管理器 ---
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # 启动时的逻辑
-    print("正在创建数据库表...")
-    Base.metadata.create_all(bind=engine)
-    if not scheduler.running:
-        scheduler.start()
-        print("调度器已启动...")
-    # yield 之后的部分是应用运行期间
-    yield
-    # 关闭时的逻辑
-    if scheduler.running:
-        scheduler.shutdown()
-        print("调度器已关闭...")
+def main():
+    """主函数"""
 
+    # 加载配置文件
+    load_config_file(os.path.join(current_dir, ".env"))
+    settings = get_settings()
+    # 设置日志
+    setup_logger(
+        level=settings.LOG_LEVEL,
+        log_dir=settings.LOGS_DIR
+    )
+    logger = logging.getLogger(__name__)
 
-# --- 2. 初始化 FastAPI 应用 ---
-app = FastAPI(
-    title="自动化任务调度系统",
-    lifespan=lifespan  # <--- 绑定 lifespan
-)
-# 注册路由
-app.include_router(router)
-# --- 3. 入口运行逻辑 ---
+    logger.info(f"⭐⭐⭐⭐⭐⭐{settings.APP_NAME} v{settings.APP_VERSION} 开始启动⭐⭐⭐⭐⭐⭐")
+
+    # 创建应用
+    app = create_app()
+
+    # 启动服务
+    uvicorn.run(
+        app,
+        host=settings.API_HOST,
+        port=settings.API_PORT,
+        log_level=settings.LOG_LEVEL.lower(),
+        access_log=True
+    )
+
 if __name__ == "__main__":
-    import uvicorn
-
-    # 注意：在生产环境通常去掉 reload=True
-    # uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-    # 使用 .env 中的配置启动
-    uvicorn.run("main:app", host=settings.APP_HOST, port=settings.APP_PORT, reload=True)
+    main()

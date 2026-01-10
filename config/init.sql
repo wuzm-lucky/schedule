@@ -1,10 +1,10 @@
 	-- ===========================
 	-- 1. 创建数据库
 	-- ===========================
-	CREATE DATABASE IF NOT EXISTS `task_scheduler`
+	CREATE DATABASE IF NOT EXISTS `scheduler`
 	    DEFAULT CHARACTER SET utf8mb4
 	    COLLATE utf8mb4_unicode_ci;
-	USE `task_scheduler`;
+	USE `scheduler`;
 	-- ===========================
 	-- 2. APScheduler 持久化表
 	-- 注意：如果使用 SQLAlchemyJobStore，APScheduler 会自动管理此表，

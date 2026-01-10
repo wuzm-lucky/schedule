@@ -90,11 +90,11 @@
 	        const btn = document.querySelector('button[onclick="loadTaskOptions()"]');
 	        if(btn) btn.innerHTML = '⏳ 加载中...';
 	        try {
-	            const res = await fetch('/api/tasks/list');
+	            const res = await fetch('/api/scripts');
 	            const json = await res.json();
 	            const select = document.getElementById('funcName');
 	            select.innerHTML = ''; // 清空
-	            if(json.code === 0) {
+	            if(json.code === 'success') {
 	                if(json.data.length === 0) {
 	                    const opt = document.createElement('option');
 	                    opt.text = "暂无脚本";
@@ -102,8 +102,8 @@
 	                } else {
 	                    json.data.forEach(item => {
 	                        const option = document.createElement('option');
-	                        option.value = item.func_name;
-	                        option.text = item.display_name;
+	                        option.value = item.path;
+	                        option.text = item.name;
 	                        select.appendChild(option);
 	                    });
 	                }
@@ -156,7 +156,7 @@
 	                })
 	            });
 	            const data = await res.json();
-	            if(data.code === 0) {
+	            if(data.code === 'success') {
 	                alert("添加成功");
 	                document.getElementById('taskName').value = '';
 	                loadTasks(); // 刷新表格
@@ -175,7 +175,7 @@
 	            const json = await res.json();
 	            const tbody = document.querySelector('#taskTable tbody');
 	            tbody.innerHTML = '';
-	            if(json.code === 0) {
+	            if(json.code === 'success') {
 	                json.data.forEach(job => {
 	                    const tr = document.createElement('tr');
 	                    tr.innerHTML = `
@@ -204,7 +204,7 @@
 	    async function runTask(jobId) {
 	        const res = await fetch(`/api/tasks/run/${jobId}`, {method: 'POST'});
 	        const data = await res.json();
-	        if(data.code === 0) alert("已触发执行");
+	        if(data.code === 'success') alert("已触发执行");
 	        else alert(data.message);
 	    }
 	    // 页面加载初始化
