@@ -16,10 +16,10 @@ load_config_file(os.path.join(current_dir, ".env"))
 from src.app import create_app
 from config import setup_logger, get_settings
 
-settings = get_settings()
 
 def main():
     """主函数"""
+    settings = get_settings()
     # 设置日志
     setup_logger(
         level=settings.LOG_LEVEL,

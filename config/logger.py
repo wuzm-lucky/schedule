@@ -6,11 +6,13 @@ import logging
 import sys
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
+from config import get_settings
 
 
 def setup_logger(level: str = "INFO", log_dir: str = None):
     """设置日志配置"""
     log_level = getattr(logging, level.upper(), logging.INFO)
+    settings = get_settings()
 
     # 创建 formatter
     formatter = logging.Formatter(
@@ -37,9 +39,9 @@ def setup_logger(level: str = "INFO", log_dir: str = None):
         log_path.mkdir(parents=True, exist_ok=True)
 
         file_handler = RotatingFileHandler(
-            log_path / "schedule.log",
-            maxBytes=20 * 1024 * 1024,  # 20MB
-            backupCount=5,
+            log_path / settings.LOGS_NAME,
+            maxBytes=settings.LOG_MAX_BYTES,
+            backupCount=settings.LOG_BACKUP_COUNT,
             encoding='utf-8'
         )
         file_handler.setLevel(log_level)

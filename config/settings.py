@@ -49,7 +49,7 @@ class Settings:
         # 应用基础配置
         self.APP_NAME: str = os.getenv("APP_NAME", "任务调度系统")
         self.APP_VERSION: str = os.getenv("APP_VERSION", "1.0.0")
-        self.APP_DESCRIPTION: str = os.getenv("APP_DESCRIPTION", "自动化任务调动系统")
+        self.APP_DESCRIPTION: str = os.getenv("APP_DESCRIPTION", "自动化任务调度系统")
         self.DEBUG: bool = bool(os.getenv("DEBUG", False))
         self.TIMEZONE: str = os.getenv("TIMEZONE", "Asia/Shanghai")
 
@@ -71,5 +71,7 @@ class Settings:
 
         # 日志配置
         self.LOGS_DIR: str = str(rootPath / os.getenv("LOGS_DIR", "logs"))
+        self.LOGS_NAME: str = os.getenv("LOGS_NAME", "schedule.log")
         self.LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+        self.LOG_BACKUP_COUNT: int = int(os.getenv("LOG_BACKUP_COUNT", "5"))
         self.LOG_MAX_BYTES: int = int(os.getenv("LOG_MAX_BYTES", "10")) * 1024 * 1024  # 修正这里
