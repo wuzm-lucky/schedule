@@ -7,6 +7,7 @@ import logging
 import os
 import queue
 import subprocess
+import sys
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -49,40 +50,69 @@ class TaskExecutor:
         try:
             # 构建执行命令
             cmd = self._build_command(task, script_path)
+            logger.info(f"Command: {' '.join(cmd)}")
 
-            # 执行脚本
+            # 执行脚本 - 使用更稳定的参数
             result = subprocess.run(
                 cmd,
-                capture_output=True,
-                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 timeout=task.timeout,
                 cwd=task.working_directory or os.path.dirname(script_path),
-                env=self._build_env(task.environment)
+                env=self._build_env(task.environment),
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
 
             duration = (datetime.now() - start_time).total_seconds()
 
+            # 手动解码输出，处理编码错误
+            try:
+                stdout = result.stdout.decode('utf-8')
+            except UnicodeDecodeError:
+                stdout = result.stdout.decode('gbk', errors='replace')
+
+            try:
+                stderr = result.stderr.decode('utf-8')
+            except UnicodeDecodeError:
+                stderr = result.stderr.decode('gbk', errors='replace')
+
             return {
                 "success": result.returncode == 0,
                 "exit_code": result.returncode,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
+                "stdout": stdout,
+                "stderr": stderr,
                 "duration": duration
             }
 
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as e:
             logger.error(f"Task timeout: {task.id}")
+            # 尝试获取已产生的输出
+            stdout = stderr = ""
+            if e.stdout:
+                try:
+                    stdout = e.stdout.decode('utf-8', errors='replace')
+                except:
+                    pass
+            if e.stderr:
+                try:
+                    stderr = e.stderr.decode('utf-8', errors='replace')
+                except:
+                    pass
             return {
                 "success": False,
-                "error": "Task execution timeout",
-                "exit_code": -1
+                "error": f"Task execution timeout after {task.timeout} seconds",
+                "exit_code": -1,
+                "stdout": stdout,
+                "stderr": stderr
             }
 
         except Exception as e:
-            logger.error(f"Task execution error: {task.id} - {e}")
+            import traceback
+            error_detail = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
+            logger.error(f"Task execution error: {task.id} - {error_detail}")
             return {
                 "success": False,
-                "error": str(e),
+                "error": error_detail,
                 "exit_code": -1
             }
 
@@ -208,7 +238,3 @@ class TaskExecutor:
         if task_env:
             env.update(task_env)
         return env
-
-
-# 导入 sys
-import sys

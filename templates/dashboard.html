@@ -1,219 +1,707 @@
-	<!DOCTYPE html>
-	<html lang="zh">
-	<head>
-	    <meta charset="UTF-8">
-	    <title>任务调度系统</title>
-	    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-	    <style>
-	        .log-container { height: 300px; overflow-y: scroll; background: #f8f9fa; padding: 10px; font-family: monospace; font-size: 0.9em; }
-	        #taskTable tbody tr:hover { background-color: #f1f1f1; }
-	    </style>
-	</head>
-	<body class="bg-light">
-	<div class="container py-4">
-	    <div class="d-flex justify-content-between align-items-center mb-4">
-	        <h3>⚙️ 任务调度管理</h3>
-	        <!-- 新增：刷新脚本按钮 -->
-	        <button class="btn btn-sm btn-outline-primary" onclick="loadTaskOptions()">
-	            🔄 刷新脚本
-	        </button>
-	    </div>
-	    <div class="row">
-	        <!-- 左侧：添加任务 -->
-	        <div class="col-md-4">
-	            <div class="card shadow-sm">
-	                <div class="card-header bg-primary text-white">添加新任务</div>
-	                <div class="card-body">
-	                    <div class="mb-3">
-	                        <label class="form-label">任务名称</label>
-	                        <input type="text" id="taskName" class="form-control" placeholder="输入任务描述">
-	                    </div>
-	                    <div class="mb-3">
-	                        <label class="form-label">选择任务脚本</label>
-	                        <select id="funcName" class="form-select">
-	                            <option value="">加载中...</option>
-	                        </select>
-	                    </div>
-	                    <div class="mb-3">
-	                        <label class="form-label">触发类型</label>
-	                        <select id="triggerType" class="form-select" onchange="updateTriggerPlaceholder()">
-	                            <option value="interval">间隔执行</option>
-	                            <option value="cron">定时执行</option>
-	                            <option value="date">单次执行</option>
-	                        </select>
-	                    </div>
-	                    <div class="mb-3">
-	                        <label class="form-label">触发参数 (JSON)</label>
-	                        <textarea id="triggerArgs" class="form-control font-monospace" rows="3" placeholder='{"seconds": 10}'></textarea>
-	                        <div class="form-text">例如: interval -> {"seconds": 10}, cron -> {"hour": 14, "minute": 30}</div>
-	                    </div>
-	                    <button class="btn btn-primary w-100" onclick="addTask()">添加任务</button>
-	                </div>
-	            </div>
-	        </div>
-	        <!-- 右侧：任务列表 -->
-	        <div class="col-md-8">
-	            <div class="card shadow-sm">
-	                <div class="card-header bg-secondary text-white">当前任务列表</div>
-	                <div class="card-body">
-	                    <table class="table table-striped table-hover" id="taskTable">
-	                        <thead>
-	                            <tr>
-	                                <th>ID</th>
-	                                <th>名称</th>
-	                                <th>下次运行时间</th>
-	                                <th>操作</th>
-	                            </tr>
-	                        </thead>
-	                        <tbody>
-	                            <!-- 动态内容 -->
-	                        </tbody>
-	                    </table>
-	                </div>
-	            </div>
-	        </div>
-	    </div>
-	    <div class="row mt-4">
-	        <div class="col-12">
-	            <div class="card shadow-sm">
-	                <div class="card-header bg-dark text-white">执行日志</div>
-	                <div class="card-body log-container" id="logContainer">
-	                    <!-- 日志内容 -->
-	                </div>
-	            </div>
-	        </div>
-	    </div>
-	</div>
-	<script>
-	    // 1. 加载任务下拉框（带热加载逻辑）
-	    async function loadTaskOptions() {
-	        const btn = document.querySelector('button[onclick="loadTaskOptions()"]');
-	        if(btn) btn.innerHTML = '⏳ 加载中...';
-	        try {
-	            const res = await fetch('/api/scripts');
-	            const json = await res.json();
-	            const select = document.getElementById('funcName');
-	            select.innerHTML = ''; // 清空
-	            if(json.code === 'success') {
-	                if(json.data.length === 0) {
-	                    const opt = document.createElement('option');
-	                    opt.text = "暂无脚本";
-	                    select.appendChild(opt);
-	                } else {
-	                    json.data.forEach(item => {
-	                        const option = document.createElement('option');
-	                        option.value = item.path;
-	                        option.text = item.name;
-	                        select.appendChild(option);
-	                    });
-	                }
-	                console.log(`[系统] 已刷新 ${json.data.length} 个脚本`);
-	            } else {
-	                alert(json.message);
-	            }
-	        } catch(e) {
-	            console.error("加载任务列表失败", e);
-	            alert('加载任务列表失败');
-	        } finally {
-	            if(btn) btn.innerHTML = '🔄 刷新脚本';
-	        }
-	    }
-	    // 2. 更新触发参数提示
-	    function updateTriggerPlaceholder() {
-	        const type = document.getElementById('triggerType').value;
-	        const input = document.getElementById('triggerArgs');
-	        if(type === 'interval') input.placeholder = '{"seconds": 10}';
-	        else if(type === 'cron') input.placeholder = '{"hour": 14, "minute": 30}';
-	        else if(type === 'date') input.placeholder = '{"run_date": "2024-05-22 14:30:00"}';
-	    }
-	    // 3. 添加任务
-	    async function addTask() {
-	        const taskName = document.getElementById('taskName').value;
-	        const funcName = document.getElementById('funcName').value;
-	        const triggerType = document.getElementById('triggerType').value;
-	        const triggerArgsStr = document.getElementById('triggerArgs').value;
-	        if(!taskName || !funcName) {
-	            alert("请填写任务名称和选择脚本");
-	            return;
-	        }
-	        let triggerArgs = {};
-	        try {
-	            if(triggerArgsStr) triggerArgs = JSON.parse(triggerArgsStr);
-	        } catch(e) {
-	            alert("触发参数不是合法的 JSON");
-	            return;
-	        }
-	        try {
-	            const res = await fetch('/api/tasks', {
-	                method: 'POST',
-	                headers: {'Content-Type': 'application/json'},
-	                body: JSON.stringify({
-	                    task_name: taskName,
-	                    func_name: funcName,
-	                    trigger_type: triggerType,
-	                    trigger_args: triggerArgs,
-	                    args: [] // 暂不传参
-	                })
-	            });
-	            const data = await res.json();
-	            if(data.code === 'success') {
-	                alert("添加成功");
-	                document.getElementById('taskName').value = '';
-	                loadTasks(); // 刷新表格
-	            } else {
-	                alert("失败: " + data.message);
-	            }
-	        } catch(e) {
-	            console.error(e);
-	            alert("请求失败");
-	        }
-	    }
-	    // 4. 加载任务列表
-	    async function loadTasks() {
-	        try {
-	            const res = await fetch('/api/tasks');
-	            const json = await res.json();
-	            const tbody = document.querySelector('#taskTable tbody');
-	            tbody.innerHTML = '';
-	            if(json.code === 'success') {
-	                json.data.forEach(job => {
-	                    const tr = document.createElement('tr');
-	                    tr.innerHTML = `
-	                        <td>${job.id.substring(0, 12)}...</td>
-	                        <td>${job.name}</td>
-	                        <td style="color: green; font-weight: bold;">${job.next_run_time||'-'}</td>
-	                        <td>
-	                            <button class="btn btn-sm btn-success" onclick="runTask('${job.id}')">立即执行</button>
-	                            <button class="btn btn-sm btn-danger" onclick="deleteTask('${job.id}')">删除</button>
-	                        </td>
-	                    `;
-	                    tbody.appendChild(tr);
-	                });
-	            }
-	        } catch(e) {
-	            console.error(e);
-	        }
-	    }
-	    // 5. 删除任务
-	    async function deleteTask(jobId) {
-	        if(!confirm("确定删除吗?")) return;
-	        await fetch(`/api/tasks/${jobId}`, {method: 'DELETE'});
-	        loadTasks();
-	    }
-	    // 6. 执行任务
-	    async function runTask(jobId) {
-	        const res = await fetch(`/api/tasks/run/${jobId}`, {method: 'POST'});
-	        const data = await res.json();
-	        if(data.code === 'success') alert("已触发执行");
-	        else alert(data.message);
-	    }
-	    // 页面加载初始化
-	    window.onload = function() {
-	        loadTaskOptions(); // 先加载下拉框
-	        loadTasks();       // 再加载表格
-	        // 定时刷新表格时间
-	        setInterval(loadTasks, 5000);
-	    };
-	</script>
-	</body>
-	</html>
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <title>任务调度管理系统</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
+    <style>
+        body {
+            background: #f5f7fa;
+            min-height: 100vh;
+        }
+        .page-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 1.5rem 2rem;
+            margin-bottom: 1.5rem;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .task-card {
+            background: white;
+            border-radius: 10px;
+            padding: 1rem;
+            margin-bottom: 1rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.08);
+            transition: all 0.3s;
+            cursor: pointer;
+            border-left: 4px solid transparent;
+        }
+        .task-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }
+        .task-card.selected {
+            border-left-color: #667eea;
+            background: #f8f9ff;
+        }
+        .task-card.disabled {
+            opacity: 0.6;
+        }
+        .task-card .task-name {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 0.5rem;
+        }
+        .task-card .task-meta {
+            font-size: 0.85rem;
+            color: #666;
+        }
+        .task-card .task-stats {
+            display: flex;
+            gap: 1rem;
+            margin-top: 0.5rem;
+            font-size: 0.85rem;
+        }
+        .stat-item {
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+        }
+        .stat-success { color: #198754; }
+        .stat-failed { color: #dc3545; }
+        .stat-total { color: #6c757d; }
+        .task-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+        .task-actions .btn {
+            padding: 0.25rem 0.75rem;
+            font-size: 0.85rem;
+        }
+        .execution-log {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 1rem;
+            border-radius: 8px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.85rem;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .execution-log .log-entry {
+            margin-bottom: 0.75rem;
+            padding-bottom: 0.75rem;
+            border-bottom: 1px solid #333;
+        }
+        .execution-log .log-entry:last-child {
+            border-bottom: none;
+        }
+        .execution-log .log-time {
+            color: #569cd6;
+        }
+        .execution-log .log-success {
+            color: #4ec9b0;
+        }
+        .execution-log .log-failed {
+            color: #f48771;
+        }
+        .execution-log .log-running {
+            color: #dcdcaa;
+        }
+        .modal-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        .search-box {
+            position: relative;
+            width: 250px;
+        }
+        .search-box input {
+            padding-right: 2.5rem;
+        }
+        .search-box .search-icon {
+            position: absolute;
+            right: 0.75rem;
+            top: 50%;
+            transform: translateY(-50%);
+            color: #999;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: #999;
+        }
+        .empty-state i {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            display: block;
+        }
+        .task-toolbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+        .task-toolbar-right {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+        }
+    </style>
+</head>
+<body>
+<div class="container-fluid py-3">
+    <!-- 页面头部 -->
+    <div class="page-header">
+        <h4 class="mb-0"><i class="bi bi-calendar-check me-2"></i>任务调度管理系统</h4>
+        <small class="opacity-75">管理和监控定时任务</small>
+    </div>
+
+    <!-- 任务列表 -->
+    <div class="card border-0 shadow-sm mb-3">
+        <div class="card-body">
+            <!-- 工具栏 -->
+            <div class="task-toolbar mb-3">
+                <!-- 左侧：添加任务按钮 -->
+                <button class="btn btn-primary" onclick="showAddModal()">
+                    <i class="bi bi-plus-lg me-1"></i>添加任务
+                </button>
+
+                <!-- 右侧：筛选、搜索、刷新 -->
+                <div class="task-toolbar-right">
+                    <div class="btn-group" role="group">
+                        <button type="button" class="btn btn-outline-secondary active" data-filter="all" onclick="setFilter('all')">
+                            全部 <span class="badge bg-secondary" id="count-all">0</span>
+                        </button>
+                        <button type="button" class="btn btn-outline-success" data-filter="enabled" onclick="setFilter('enabled')">
+                            已启用 <span class="badge bg-success" id="count-enabled">0</span>
+                        </button>
+                        <button type="button" class="btn btn-outline-warning" data-filter="disabled" onclick="setFilter('disabled')">
+                            已暂停 <span class="badge bg-warning" id="count-disabled">0</span>
+                        </button>
+                    </div>
+                    <div class="search-box">
+                        <input type="text" class="form-control" id="searchInput" placeholder="搜索任务..." onkeyup="filterTasks()">
+                        <i class="bi bi-search search-icon"></i>
+                    </div>
+                    <button class="btn btn-outline-secondary" onclick="loadTasks()">
+                        <i class="bi bi-arrow-clockwise"></i> 刷新
+                    </button>
+                </div>
+            </div>
+
+            <!-- 任务列表 -->
+            <div id="taskList">
+                <div class="empty-state">
+                    <i class="bi bi-inbox"></i>
+                    <p>暂无任务</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 执行记录 -->
+    <div class="card border-0 shadow-sm">
+        <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h6 class="mb-0">执行记录</h6>
+                <span id="selectedTaskName" class="text-muted small">请选择任务</span>
+            </div>
+            <div class="execution-log" id="executionLog">
+                <div class="empty-state">
+                    <i class="bi bi-terminal"></i>
+                    <p>点击任务查看执行记录</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 添加任务弹窗 -->
+<div class="modal fade" id="addTaskModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-plus-circle me-2"></i>添加新任务</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="addTaskForm">
+                    <input type="hidden" id="editTaskId" value="">
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">任务名称 <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control" id="taskName" required placeholder="输入任务名称">
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">选择脚本 <span class="text-danger">*</span></label>
+                            <select class="form-select" id="scriptPath" required>
+                                <option value="">请选择脚本</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">触发类型 <span class="text-danger">*</span></label>
+                            <select class="form-select" id="triggerType" required onchange="updateTriggerPlaceholder()">
+                                <option value="interval">间隔执行</option>
+                                <option value="cron">定时执行 (Cron)</option>
+                                <option value="date">单次执行</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">触发参数</label>
+                            <input type="text" class="form-control" id="triggerArgs" placeholder='{"seconds": 60}'>
+                            <div class="form-text">
+                                <small id="triggerHint">间隔: {"seconds": 60} | 定时: {"hour": 14, "minute": 30}</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">任务描述</label>
+                        <textarea class="form-control" id="taskDescription" rows="2" placeholder="输入任务描述（可选）"></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="submitTask()">
+                    <i class="bi bi-check-lg me-1"></i>保存任务
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+const API_BASE = '/api';
+let allTasks = [];
+let currentFilter = 'all';
+let selectedTaskId = null;
+
+// 页面加载初始化
+document.addEventListener('DOMContentLoaded', function() {
+    loadScripts();
+    loadTasks();
+    // 定时刷新
+    setInterval(() => {
+        loadTasks(false);
+        if (selectedTaskId) loadExecutions(selectedTaskId);
+    }, 30000);
+});
+
+// 加载脚本列表
+async function loadScripts() {
+    try {
+        const res = await fetch(`${API_BASE}/scripts`);
+        const json = await res.json();
+        const select = document.getElementById('scriptPath');
+        select.innerHTML = '<option value="">请选择脚本</option>';
+
+        if (json.code === 'success') {
+            json.data.forEach(item => {
+                const option = document.createElement('option');
+                option.value = item.path;
+                option.text = item.name;
+                select.appendChild(option);
+            });
+        }
+    } catch (e) {
+        console.error('加载脚本失败:', e);
+    }
+}
+
+// 加载任务列表
+async function loadTasks(showLoading = true) {
+    try {
+        const res = await fetch(`${API_BASE}/tasks`);
+        const json = await res.json();
+
+        if (json.code === 'success') {
+            allTasks = json.data;
+            renderTasks();
+            updateCounts();
+        }
+    } catch (e) {
+        console.error('加载任务失败:', e);
+    }
+}
+
+// 渲染任务列表
+function renderTasks() {
+    const container = document.getElementById('taskList');
+    let tasks = [...allTasks];
+
+    // 应用筛选
+    if (currentFilter === 'enabled') {
+        tasks = tasks.filter(t => t.enabled);
+    } else if (currentFilter === 'disabled') {
+        tasks = tasks.filter(t => !t.enabled);
+    }
+
+    // 应用搜索
+    const keyword = document.getElementById('searchInput').value.toLowerCase();
+    if (keyword) {
+        tasks = tasks.filter(t => t.name.toLowerCase().includes(keyword));
+    }
+
+    if (tasks.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <i class="bi bi-inbox"></i>
+                <p>暂无任务</p>
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = tasks.map(task => `
+        <div class="task-card ${!task.enabled ? 'disabled' : ''} ${selectedTaskId === task.id ? 'selected' : ''}"
+             onclick="selectTask('${task.id}')">
+            <div class="d-flex justify-content-between align-items-start">
+                <div class="flex-grow-1">
+                    <div class="task-name">
+                        ${task.enabled ?
+                            '<i class="bi bi-play-circle-fill text-success me-1"></i>' :
+                            '<i class="bi bi-pause-circle text-warning me-1"></i>'}
+                        ${escapeHtml(task.name)}
+                    </div>
+                    <div class="task-meta">
+                        <span class="badge bg-secondary">${task.trigger_type}</span>
+                        ${task.trigger_type === 'cron' ? `<code>${escapeHtml(task.cron_expression || '')}</code>` : ''}
+                        ${task.trigger_type === 'interval' ? `每 ${task.interval_seconds} 秒` : ''}
+                        ${task.next_run_time ? `<span class="ms-2"><i class="bi bi-clock"></i> ${formatTime(task.next_run_time)}</span>` : ''}
+                    </div>
+                    <div class="task-stats">
+                        <span class="stat-item stat-total">
+                            <i class="bi bi-arrow-repeat"></i> ${task.run_count || 0}
+                        </span>
+                        <span class="stat-item stat-success">
+                            <i class="bi bi-check-circle"></i> ${task.success_count || 0}
+                        </span>
+                        <span class="stat-item stat-failed">
+                            <i class="bi bi-x-circle"></i> ${task.failed_count || 0}
+                        </span>
+                    </div>
+                </div>
+                <div class="task-actions" onclick="event.stopPropagation()">
+                    ${task.enabled ?
+                        `<button class="btn btn-warning btn-sm" onclick="toggleTask('${task.id}', false)" title="暂停">
+                            <i class="bi bi-pause"></i>
+                        </button>` :
+                        `<button class="btn btn-success btn-sm" onclick="toggleTask('${task.id}', true)" title="启用">
+                            <i class="bi bi-play"></i>
+                        </button>`
+                    }
+                    ${!task.enabled ?
+                        `<button class="btn btn-info btn-sm" onclick="editTask('${task.id}')" title="编辑">
+                            <i class="bi bi-pencil"></i>
+                        </button>` : ''
+                    }
+                    <button class="btn btn-primary btn-sm" onclick="runTask('${task.id}')" title="立即执行">
+                        <i class="bi bi-play-fill"></i>
+                    </button>
+                    <button class="btn btn-danger btn-sm" onclick="deleteTask('${task.id}')" title="删除">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+// 更新计数
+function updateCounts() {
+    document.getElementById('count-all').textContent = allTasks.length;
+    document.getElementById('count-enabled').textContent = allTasks.filter(t => t.enabled).length;
+    document.getElementById('count-disabled').textContent = allTasks.filter(t => !t.enabled).length;
+}
+
+// 选择任务
+function selectTask(taskId) {
+    selectedTaskId = taskId;
+    const task = allTasks.find(t => t.id === taskId);
+    document.getElementById('selectedTaskName').textContent = task ? task.name : '请选择任务';
+    renderTasks();
+    loadExecutions(taskId);
+}
+
+// 加载执行记录
+async function loadExecutions(taskId) {
+    try {
+        const res = await fetch(`${API_BASE}/tasks/${taskId}/executions?limit=50`);
+        const json = await res.json();
+        const container = document.getElementById('executionLog');
+
+        if (json.code === 'success') {
+            if (json.data.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <i class="bi bi-terminal"></i>
+                        <p>暂无执行记录</p>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = json.data.map(log => {
+                const statusClass = log.status === 'success' ? 'log-success' :
+                                   log.status === 'failed' ? 'log-failed' : 'log-running';
+                const statusIcon = log.status === 'success' ? 'check-circle' :
+                                  log.status === 'failed' ? 'x-circle' : 'arrow-repeat';
+
+                return `
+                    <div class="log-entry">
+                        <div>
+                            <span class="log-time">${formatTime(log.start_time)}</span>
+                            <span class="${statusClass}">
+                                <i class="bi bi-${statusIcon}"></i> ${log.status.toUpperCase()}
+                            </span>
+                            ${log.duration ? `<span class="text-muted"> | 耗时 ${log.duration?.toFixed(2)}s</span>` : ''}
+                        </div>
+                        ${log.output ? `<div class="text-muted mt-1">${escapeHtml(log.output.substring(0, 200))}</div>` : ''}
+                        ${log.error ? `<div class="text-danger mt-1">${escapeHtml(log.error.substring(0, 200))}</div>` : ''}
+                    </div>
+                `;
+            }).join('');
+        }
+    } catch (e) {
+        console.error('加载执行记录失败:', e);
+    }
+}
+
+// 设置筛选
+function setFilter(filter) {
+    currentFilter = filter;
+    document.querySelectorAll('[data-filter]').forEach(btn => {
+        btn.classList.remove('active');
+        if (btn.dataset.filter === filter) {
+            btn.classList.add('active');
+        }
+    });
+    renderTasks();
+}
+
+// 搜索过滤
+function filterTasks() {
+    renderTasks();
+}
+
+// 显示添加弹窗
+function showAddModal() {
+    loadScripts();
+    document.getElementById('addTaskForm').reset();
+    document.getElementById('editTaskId').value = '';
+    document.querySelector('#addTaskModal .modal-title').innerHTML = '<i class="bi bi-plus-circle me-2"></i>添加新任务';
+    new bootstrap.Modal(document.getElementById('addTaskModal')).show();
+}
+
+// 编辑任务
+async function editTask(taskId) {
+    try {
+        // 先从服务端获取最新的任务信息
+        const res = await fetch(`${API_BASE}/tasks/${taskId}`);
+        const json = await res.json();
+
+        if (json.code !== 'success' || !json.data) {
+            alert('获取任务信息失败');
+            return;
+        }
+
+        const task = json.data;
+
+        loadScripts();
+        document.getElementById('editTaskId').value = taskId;
+        document.getElementById('taskName').value = task.name;
+        document.getElementById('scriptPath').value = task.script_path;
+        document.getElementById('triggerType').value = task.trigger_type;
+        document.getElementById('taskDescription').value = task.description || '';
+
+        // 设置触发参数
+        if (task.trigger_type === 'interval') {
+            document.getElementById('triggerArgs').value = JSON.stringify({seconds: task.interval_seconds});
+        } else if (task.trigger_type === 'cron') {
+            document.getElementById('triggerArgs').value = task.cron_expression || '';
+        }
+
+        document.querySelector('#addTaskModal .modal-title').innerHTML = '<i class="bi bi-pencil me-2"></i>编辑任务';
+        new bootstrap.Modal(document.getElementById('addTaskModal')).show();
+    } catch (e) {
+        console.error('编辑任务失败:', e);
+        alert('获取任务信息失败');
+    }
+}
+
+// 更新触发器提示
+function updateTriggerPlaceholder() {
+    const type = document.getElementById('triggerType').value;
+    const hint = document.getElementById('triggerHint');
+    const args = document.getElementById('triggerArgs');
+
+    if (type === 'interval') {
+        args.placeholder = '{"seconds": 60}';
+        hint.textContent = '间隔执行，单位：秒';
+    } else if (type === 'cron') {
+        args.placeholder = '{"hour": 14, "minute": 30}';
+        hint.textContent = '定时执行，时:分';
+    } else {
+        args.placeholder = '{"run_date": "2024-12-31 14:30:00"}';
+        hint.textContent = '单次执行，指定日期时间';
+    }
+}
+
+// 提交任务
+async function submitTask() {
+    const editId = document.getElementById('editTaskId').value;
+    const name = document.getElementById('taskName').value.trim();
+    const scriptPath = document.getElementById('scriptPath').value;
+    const triggerType = document.getElementById('triggerType').value;
+    const triggerArgsStr = document.getElementById('triggerArgs').value.trim();
+    const description = document.getElementById('taskDescription').value.trim();
+
+    if (!name || !scriptPath) {
+        alert('请填写任务名称和选择脚本');
+        return;
+    }
+
+    let triggerArgs = {};
+    if (triggerArgsStr) {
+        try {
+            triggerArgs = JSON.parse(triggerArgsStr);
+        } catch (e) {
+            alert('触发参数格式错误，请输入有效的JSON');
+            return;
+        }
+    }
+
+    try {
+        let url = `${API_BASE}/tasks`;
+        let method = 'POST';
+
+        if (editId) {
+            // 编辑模式：使用PUT方法更新任务
+            url = `${API_BASE}/tasks/${editId}`;
+            method = 'PUT';
+        }
+
+        const res = await fetch(url, {
+            method: method,
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                task_name: name,
+                func_name: scriptPath,
+                trigger_type: triggerType,
+                trigger_args: triggerType === 'cron' ? JSON.parse(triggerArgsStr || '{}') :
+                           triggerType === 'interval' ? JSON.parse(triggerArgsStr || '{}') : {},
+                args: [],
+                script_path: scriptPath,
+                cron_expression: triggerType === 'cron' ? triggerArgsStr : null,
+                interval_seconds: triggerType === 'interval' ? triggerArgs.seconds : null,
+                arguments: [],
+                working_directory: null,
+                timeout: 300,
+                enabled: false,  // 编辑后默认保持暂停状态
+                description: description
+            })
+        });
+
+        const data = await res.json();
+        if (data.code === 'success') {
+            bootstrap.Modal.getInstance(document.getElementById('addTaskModal')).hide();
+            loadTasks();
+        } else {
+            alert('操作失败: ' + (data.message || '未知错误'));
+        }
+    } catch (e) {
+        console.error(e);
+        alert('请求失败');
+    }
+}
+
+// 切换任务状态
+async function toggleTask(taskId, enabled) {
+    try {
+        const res = await fetch(`${API_BASE}/tasks/${taskId}`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ enabled })
+        });
+
+        const data = await res.json();
+        if (data.code === 'success') {
+            loadTasks();
+        }
+    } catch (e) {
+        console.error(e);
+    }
+}
+
+// 立即执行任务
+async function runTask(taskId) {
+    if (!confirm('确定要立即执行此任务吗？')) return;
+
+    try {
+        const res = await fetch(`${API_BASE}/tasks/run/${taskId}`, { method: 'POST' });
+        const data = await res.json();
+        if (data.code === 'success') {
+            // alert('任务已触发执行');
+            if (selectedTaskId === taskId) {
+                setTimeout(() => loadExecutions(taskId), 1000);
+            }
+        } else {
+            alert(data.message);
+        }
+    } catch (e) {
+        console.error(e);
+        alert('执行失败');
+    }
+}
+
+// 删除任务
+async function deleteTask(taskId) {
+    if (!confirm('确定要删除此任务吗？删除后可以恢复。')) return;
+
+    try {
+        const res = await fetch(`${API_BASE}/tasks/${taskId}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (data.code === 'success') {
+            loadTasks();
+            if (selectedTaskId === taskId) {
+                selectedTaskId = null;
+                document.getElementById('executionLog').innerHTML = `
+                    <div class="empty-state">
+                        <i class="bi bi-terminal"></i>
+                        <p>点击任务查看执行记录</p>
+                    </div>
+                `;
+                document.getElementById('selectedTaskName').textContent = '请选择任务';
+            }
+        }
+    } catch (e) {
+        console.error(e);
+        alert('删除失败');
+    }
+}
+
+// 格式化时间
+function formatTime(timeStr) {
+    if (!timeStr) return '-';
+    const date = new Date(timeStr);
+    const now = new Date();
+    const diff = now - date;
+
+    if (diff < 60000) return '即将执行';
+    if (diff < 3600000) return Math.floor(diff / 60000) + '分钟后';
+    if (diff < 86400000) return Math.floor(diff / 3600000) + '小时后';
+
+    return date.toLocaleString('zh-CN', {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+    });
+}
+
+// HTML 转义
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+</script>
+</body>
+</html>

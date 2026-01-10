@@ -26,9 +26,19 @@ Base = declarative_base()
 
 # 依赖注入
 def get_db():
-    SessionLocal = get_session_factory()
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
+
+def get_session_factory():
+    """获取会话工厂"""
+    return SessionLocal
+
+
+def init_db():
+    """初始化数据库表"""
+    from src.models.database import TaskModel, TaskExecutionModel
+    Base.metadata.create_all(bind=engine)
