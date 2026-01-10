@@ -4,22 +4,22 @@ Schedule 主入口
 import os
 import logging
 import sys
+import uvicorn
 
+from config import load_config_file
 # 添加项目根目录到 Python 路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
+# 加载配置文件（在获取 settings 之前）
+load_config_file(os.path.join(current_dir, ".env"))
 
-import uvicorn
 from src.app import create_app
-from config import setup_logger, get_settings, load_config_file
+from config import setup_logger, get_settings
 
+settings = get_settings()
 
 def main():
     """主函数"""
-
-    # 加载配置文件
-    load_config_file(os.path.join(current_dir, ".env"))
-    settings = get_settings()
     # 设置日志
     setup_logger(
         level=settings.LOG_LEVEL,

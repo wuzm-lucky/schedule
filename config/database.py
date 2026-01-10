@@ -26,6 +26,7 @@ Base = declarative_base()
 
 # 依赖注入
 def get_db():
+    SessionLocal = get_session_factory()
     db = SessionLocal()
     try:
         yield db
