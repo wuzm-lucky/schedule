@@ -43,10 +43,10 @@ def setup_script_logger(
     # 获取日志文件路径
     log_file = os.environ.get('TASK_SCRIPT_LOG')
 
-    # 如果没有日志文件路径，尝试使用默认的 script_logs 目录
+    # 如果没有日志文件路径，尝试使用默认的 logs/script 目录
     if not log_file:
         script_name = os.path.basename(sys.argv[0]).replace('.py', '')
-        log_dir = project_root / 'script_logs'
+        log_dir = project_root / 'logs' / 'script'
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = str(log_dir / f"{script_name}.log")
 

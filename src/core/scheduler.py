@@ -21,6 +21,7 @@ from src.core.task_executor import TaskExecutor
 from src.models.task import Task, TaskStatus, TriggerType
 from src.models.database import TaskModel, TaskExecutionModel
 from src.repository.task_repository import TaskRepository, TaskExecutionRepository
+from src.constants import SchedulerConfig
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -196,64 +197,16 @@ class TaskScheduler:
         """
         import traceback
         try:
-            # 如果传入的是 TaskModel，转换为 Task 领域模型
-            if isinstance(task, TaskModel):
-                task = task.to_domain()
+            # 确保是领域模型
+            task = self._ensure_domain_model(task)
+
+            # 保存到数据库
             if save_to_db:
-                # 使用 Repository 保存任务
-                db = SessionLocal()
-                try:
-                    repo = TaskRepository(db)
-                    task_model = TaskModel.from_domain(task)
+                self._save_task_to_db(task)
 
-                    # 检查是否已存在
-                    existing = repo.get(task.id)
-                    if existing:
-                        # 更新现有任务，保留统计信息
-                        task_model.run_count = existing.run_count
-                        task_model.success_count = existing.success_count
-                        task_model.failed_count = existing.failed_count
-                        task_model.deleted = existing.deleted
-                        # 更新字段
-                        for key in ['name', 'script_path', 'trigger_type', 'cron_expression',
-                                   'interval_seconds', 'scheduled_time', 'arguments', 'working_directory',
-                                   'environment', 'timeout', 'enabled', 'description',
-                                   'notification_enabled', 'notification_config']:
-                            setattr(existing, key, getattr(task_model, key))
-                        db.commit()
-                    else:
-                        # 新增任务
-                        task_model.run_count = 0
-                        task_model.success_count = 0
-                        task_model.failed_count = 0
-                        task_model.deleted = False
-                        repo.create(task_model)
-
-                    logger.info(f"Task saved to database: {task.id}")
-                finally:
-                    db.close()
-
-            # 如果任务已存在，先移除
-            if self.scheduler.get_job(task.id):
-                self.remove_task(task.id, remove_from_db=False)
-
-            # 只有当任务启用时才添加到调度器（或强制添加）
+            # 添加到调度器
             if task.enabled or force_add:
-                trigger = self._create_trigger(task)
-                logger.info(f"Trigger created for task {task.id}: {trigger}")
-
-                self.scheduler.add_job(
-                    func=_execute_task_wrapper,
-                    trigger=trigger,
-                    id=task.id,
-                    name=task.name,
-                    args=[task.id],
-                    max_instances=1,
-                    replace_existing=True,
-                    misfire_grace_time=300
-                )
-
-                logger.info(f"Task added to scheduler: {task.id} - {task.name}")
+                self._schedule_task(task)
             else:
                 logger.info(f"Task saved but not added to scheduler (disabled): {task.id} - {task.name}")
 
@@ -262,6 +215,81 @@ class TaskScheduler:
         except Exception as e:
             logger.error(f"Failed to add task {task.id}: {e}\n{traceback.format_exc()}")
             return False
+
+    def _ensure_domain_model(self, task: Task) -> Task:
+        """确保传入的是领域模型"""
+        if isinstance(task, TaskModel):
+            return task.to_domain()
+        return task
+
+    def _save_task_to_db(self, task: Task) -> None:
+        """保存任务到数据库"""
+        db = SessionLocal()
+        try:
+            repo = TaskRepository(db)
+            task_model = TaskModel.from_domain(task)
+
+            # 检查是否已存在
+            existing = repo.get(task.id)
+            if existing:
+                self._update_existing_task(existing, task_model, db)
+            else:
+                self._create_new_task(task_model, repo)
+
+            logger.info(f"Task saved to database: {task.id}")
+        finally:
+            db.close()
+
+    def _update_existing_task(self, existing: TaskModel, new_model: TaskModel, db) -> None:
+        """更新现有任务，保留统计信息"""
+        # 保留统计信息
+        new_model.run_count = existing.run_count
+        new_model.success_count = existing.success_count
+        new_model.failed_count = existing.failed_count
+        new_model.deleted = existing.deleted
+
+        # 更新字段
+        updatable_fields = [
+            'name', 'script_path', 'trigger_type', 'cron_expression',
+            'interval_seconds', 'scheduled_time', 'arguments', 'working_directory',
+            'environment', 'timeout', 'enabled', 'description',
+            'notification_enabled', 'notification_config'
+        ]
+        for key in updatable_fields:
+            setattr(existing, key, getattr(new_model, key))
+        db.commit()
+
+    def _create_new_task(self, task_model: TaskModel, repo: TaskRepository) -> None:
+        """创建新任务"""
+        task_model.run_count = 0
+        task_model.success_count = 0
+        task_model.failed_count = 0
+        task_model.deleted = False
+        repo.create(task_model)
+
+    def _schedule_task(self, task: Task) -> None:
+        """将任务添加到调度器"""
+        # 如果任务已存在，先移除
+        if self.scheduler.get_job(task.id):
+            self.remove_task(task.id, remove_from_db=False)
+
+        # 创建触发器
+        trigger = self._create_trigger(task)
+        logger.info(f"Trigger created for task {task.id}: {trigger}")
+
+        # 添加任务
+        self.scheduler.add_job(
+            func=_execute_task_wrapper,
+            trigger=trigger,
+            id=task.id,
+            name=task.name,
+            args=[task.id],
+            max_instances=SchedulerConfig.MAX_INSTANCES,
+            replace_existing=True,
+            misfire_grace_time=SchedulerConfig.MISFIRE_GRACE_TIME
+        )
+
+        logger.info(f"Task added to scheduler: {task.id} - {task.name}")
 
     def remove_task(self, task_id: str, remove_from_db: bool = True) -> bool:
         """移除任务"""
@@ -479,7 +507,7 @@ class TaskScheduler:
                                 id=task.id,
                                 name=task.name,
                                 args=[task.id],
-                                max_instances=1,
+                                max_instances=SchedulerConfig.MAX_INSTANCES,
                                 replace_existing=False
                             )
                             logger.info(f"Loaded task from db: {task.id} - {task.name}")

@@ -5,14 +5,17 @@
 
 import logging
 import os
+import re
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request, Query
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from config import get_settings
+from src.constants import ValidationConfig
 from src.services import TaskService, ExecutionService
 from src.models import CommonResponse
 
@@ -54,6 +57,76 @@ class TaskAddRequest(BaseModel):
     enabled: bool = True
     description: Optional[str] = None
 
+    @field_validator('task_name')
+    @classmethod
+    def validate_task_name(cls, v: str) -> str:
+        """验证任务名称"""
+        if not (ValidationConfig.TASK_NAME_MIN_LENGTH <= len(v) <= ValidationConfig.TASK_NAME_MAX_LENGTH):
+            raise ValueError(
+                f'任务名称长度必须在{ValidationConfig.TASK_NAME_MIN_LENGTH}-'
+                f'{ValidationConfig.TASK_NAME_MAX_LENGTH}之间'
+            )
+        return v.strip()
+
+    @field_validator('description')
+    @classmethod
+    def validate_description(cls, v: Optional[str]) -> Optional[str]:
+        """验证描述长度"""
+        if v and len(v) > ValidationConfig.DESCRIPTION_MAX_LENGTH:
+            raise ValueError(f'描述长度不能超过{ValidationConfig.DESCRIPTION_MAX_LENGTH}字符')
+        return v
+
+    @field_validator('script_path', 'func_name')
+    @classmethod
+    def validate_script_path(cls, v: Optional[str]) -> Optional[str]:
+        """验证脚本路径"""
+        if v:
+            v = v.strip()
+            if len(v) > ValidationConfig.SCRIPT_PATH_MAX_LENGTH:
+                raise ValueError(f'脚本路径长度不能超过{ValidationConfig.SCRIPT_PATH_MAX_LENGTH}字符')
+        return v
+
+    @field_validator('cron_expression')
+    @classmethod
+    def validate_cron_expression(cls, v: Optional[str]) -> Optional[str]:
+        """验证cron表达式格式"""
+        if v:
+            v = v.strip()
+            if len(v) > ValidationConfig.CRON_EXPRESSION_MAX_LENGTH:
+                raise ValueError(f'cron表达式长度不能超过{ValidationConfig.CRON_EXPRESSION_MAX_LENGTH}字符')
+            # 基本格式验证: 5或6个字段，用空格分隔
+            fields = v.split()
+            if len(fields) not in (5, 6):
+                raise ValueError('cron表达式必须是5或6个字段（秒 分 时 日 月 周 或 分 时 日 月 周）')
+        return v
+
+    @field_validator('interval_seconds')
+    @classmethod
+    def validate_interval_seconds(cls, v: Optional[int]) -> Optional[int]:
+        """验证间隔秒数"""
+        if v is not None and v <= 0:
+            raise ValueError('间隔秒数必须大于0')
+        return v
+
+    @field_validator('timeout')
+    @classmethod
+    def validate_timeout(cls, v: int) -> int:
+        """验证超时时间"""
+        if v < 1:
+            raise ValueError('超时时间必须大于0秒')
+        if v > 86400:  # 24小时
+            raise ValueError('超时时间不能超过24小时（86400秒）')
+        return v
+
+    @field_validator('trigger_type')
+    @classmethod
+    def validate_trigger_type(cls, v: str) -> str:
+        """验证触发器类型"""
+        valid_types = {'cron', 'interval', 'date'}
+        if v.lower() not in valid_types:
+            raise ValueError(f'触发器类型必须是以下之一: {", ".join(valid_types)}')
+        return v.lower()
+
 
 class TaskUpdateRequest(BaseModel):
     """更新任务请求"""
@@ -69,10 +142,42 @@ class TaskUpdateRequest(BaseModel):
     working_directory: Optional[str] = None
     timeout: Optional[int] = None
 
+    @field_validator('name')
+    @classmethod
+    def validate_name(cls, v: Optional[str]) -> Optional[str]:
+        """验证任务名称"""
+        if v:
+            v = v.strip()
+            if not (ValidationConfig.TASK_NAME_MIN_LENGTH <= len(v) <= ValidationConfig.TASK_NAME_MAX_LENGTH):
+                raise ValueError(
+                    f'任务名称长度必须在{ValidationConfig.TASK_NAME_MIN_LENGTH}-'
+                    f'{ValidationConfig.TASK_NAME_MAX_LENGTH}之间'
+                )
+        return v
+
+    @field_validator('timeout')
+    @classmethod
+    def validate_timeout(cls, v: Optional[int]) -> Optional[int]:
+        """验证超时时间"""
+        if v is not None:
+            if v < 1:
+                raise ValueError('超时时间必须大于0秒')
+            if v > 86400:
+                raise ValueError('超时时间不能超过24小时（86400秒）')
+        return v
+
 
 class TaskExecuteRequest(BaseModel):
     """立即执行任务请求"""
     task_id: str
+
+    @field_validator('task_id')
+    @classmethod
+    def validate_task_id(cls, v: str) -> str:
+        """验证任务ID格式"""
+        if not v or not v.strip():
+            raise ValueError('任务ID不能为空')
+        return v.strip()
 
 
 class TaskQueryRequest(BaseModel):

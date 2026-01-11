@@ -56,7 +56,7 @@ class Settings(BaseSettings):
         return root_path / self.scripts_dir
 
     # ========== 脚本日志目录配置 ==========
-    script_logs_dir: str = Field(default="script_logs", alias="SCRIPT_LOGS_DIR")
+    script_logs_dir: str = Field(default="logs/script", alias="SCRIPT_LOGS_DIR")
 
     @property
     def script_logs_path(self) -> Path:

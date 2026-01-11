@@ -6,6 +6,7 @@
 import logging
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -16,6 +17,7 @@ from dataclasses import dataclass
 
 from config import get_settings
 from src.models.task import Task
+from src.constants import ScriptConfig
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -23,48 +25,71 @@ settings = get_settings()
 
 @dataclass
 class CommandBuilder:
-    """命令构建器"""
+    """命令构建器 - 支持跨平台可执行文件检测"""
     extensions: List[str]
-    command: List[str]
-    check_executable: Optional[Callable[[str], bool]] = None
+    executable_names: List[str]
+    extra_args: List[str] = None
+
+    def __post_init__(self):
+        if self.extra_args is None:
+            self.extra_args = []
+
+    def resolve_executable(self) -> Optional[str]:
+        """解析可用的可执行文件路径"""
+        for name in self.executable_names:
+            # 特殊处理 Python - 使用当前解释器
+            if name == 'python':
+                return sys.executable
+
+            # 使用 shutil.which 查找可执行文件
+            exe_path = shutil.which(name)
+            if exe_path:
+                return exe_path
+        return None
 
     def build(self, script_path: str, arguments: List[str]) -> List[str]:
         """构建命令"""
-        if self.check_executable:
-            if not self.check_executable(self.command[0]):
-                raise RuntimeError(f"Executable not found: {self.command[0]}")
-        return self.command + [script_path] + arguments
+        executable = self.resolve_executable()
+        if not executable:
+            extensions_str = ', '.join(self.extensions)
+            raise RuntimeError(
+                f"未找到可执行文件: {self.executable_names} "
+                f"(用于扩展名: {extensions_str})"
+            )
+        return [executable] + self.extra_args + [script_path] + arguments
 
 
 class TaskExecutor:
     """任务执行器 - 使用 subprocess 进程隔离执行脚本"""
 
-    # 支持的脚本类型命令构建器
+    # 支持的脚本类型命令构建器（跨平台兼容）
     COMMAND_BUILDERS: List[CommandBuilder] = [
-        CommandBuilder(['.py'], [sys.executable]),
-        CommandBuilder(['.sh'], ['/bin/bash']),
-        CommandBuilder(['.bash'], ['/bin/bash']),
-        CommandBuilder(['.bat', '.cmd'], ['cmd.exe', '/c']),
-        CommandBuilder(['.js'], ['node']),
-        CommandBuilder(['.ts'], ['npx', 'ts-node']),
-        CommandBuilder(['.ps1'], ['pwsh', '-File'], lambda x: self._check_pwsh(x)),
+        # Python - 使用当前解释器
+        CommandBuilder(['.py'], ['python']),
+
+        # Shell/Bash - Unix/Linux
+        CommandBuilder(['.sh'], ['bash', 'sh']),
+        CommandBuilder(['.bash'], ['bash']),
+
+        # Windows Batch
+        CommandBuilder(['.bat', '.cmd'], ['cmd.exe'], ['/c']),
+
+        # JavaScript/TypeScript - Node.js 生态
+        CommandBuilder(['.js'], ['node', 'nodejs']),
+        CommandBuilder(['.ts'], ['npx'], ['ts-node']),
+
+        # PowerShell - 跨平台
+        CommandBuilder(['.ps1'], ['pwsh', 'powershell'], ['-File']),
+
+        # Ruby
         CommandBuilder(['.rb'], ['ruby']),
-        CommandBuilder(['.php'], ['php']),
+
+        # PHP
+        CommandBuilder(['.php'], ['php', 'php-cli']),
+
+        # Perl
         CommandBuilder(['.pl'], ['perl']),
     ]
-
-    @staticmethod
-    def _check_pwsh(executable: str) -> bool:
-        """检查 PowerShell 是否可用"""
-        try:
-            result = subprocess.run(
-                [executable, '-Version'],
-                capture_output=True,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
 
     def __init__(self):
         self._running_processes: Dict[str, subprocess.Popen] = {}
@@ -221,38 +246,6 @@ class TaskExecutor:
                     log_handle.close()
                 except Exception:
                     pass
-
-    def _log_error_to_file(self, log_handle, error_message: str, exception: Exception, start_time: datetime):
-        """记录错误到日志文件"""
-        if not log_handle or log_handle.closed:
-            return
-
-        try:
-            duration = (datetime.now() - start_time).total_seconds()
-            error_footer = f"\n{'-'*80}\n"
-            error_footer += f"执行结果: 失败\n"
-            error_footer += f"错误: {error_message}\n"
-            error_footer += f"耗时: {duration:.2f}秒\n"
-            error_footer += f"结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            log_handle.write(error_footer.encode('utf-8'))
-
-            # 如果有输出，也记录（转换为UTF-8字节）
-            if hasattr(exception, 'stdout') and exception.stdout:
-                stdout_bytes = exception.stdout if isinstance(exception.stdout, bytes) else str(exception.stdout).encode('utf-8')
-                log_handle.write("\n[标准输出]\n".encode('utf-8'))
-                log_handle.write(self._convert_to_utf8_bytes(stdout_bytes))
-                log_handle.write('\n'.encode('utf-8'))
-
-            if hasattr(exception, 'stderr') and exception.stderr:
-                stderr_bytes = exception.stderr if isinstance(exception.stderr, bytes) else str(exception.stderr).encode('utf-8')
-                log_handle.write("\n[标准错误]\n".encode('utf-8'))
-                log_handle.write(self._convert_to_utf8_bytes(stderr_bytes))
-                log_handle.write('\n'.encode('utf-8'))
-
-            log_handle.write(f"{'='*80}\n".encode('utf-8'))
-            log_handle.flush()
-        except Exception:
-            pass
 
     def execute_async(self, task: Task, execution_id: str,
                       callback: Optional[Callable] = None) -> str:
