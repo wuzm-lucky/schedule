@@ -337,7 +337,7 @@ async def run_task(task_id: str):
 @router.get("/tasks/{task_id}/executions", response_model=CommonResponse)
 async def get_task_executions(
     task_id: str,
-    limit: int = Query(50, le=200),
+    limit: int = Query(100, le=100),
     status: Optional[str] = None
 ):
     """获取任务执行记录"""

@@ -4,11 +4,11 @@
 """
 
 import os
-from pathlib import Path
-from typing import Optional
 from functools import lru_cache
-from pydantic_settings import BaseSettings
+from pathlib import Path
+
 from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings
 
 
 def load_config_file(config_path: str):
@@ -117,15 +117,3 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """获取配置单例"""
     return Settings()
-
-
-# 为了保持向后兼容，保留旧的变量名
-_settings = None
-
-
-def get_settings_legacy():
-    """旧版配置获取方式（兼容性）"""
-    global _settings
-    if _settings is None:
-        _settings = Settings()
-    return _settings
