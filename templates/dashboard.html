@@ -504,7 +504,9 @@ async function editTask(taskId) {
 
         const task = json.data;
 
-        loadScripts();
+        // 等待脚本列表加载完成后再设置表单值
+        await loadScripts();
+
         document.getElementById('editTaskId').value = taskId;
         document.getElementById('taskName').value = task.name;
         document.getElementById('scriptPath').value = task.script_path;
