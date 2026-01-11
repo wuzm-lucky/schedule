@@ -197,8 +197,24 @@
     <div class="card border-0 shadow-sm">
         <div class="card-body">
             <div class="d-flex justify-content-between align-items-center mb-3">
-                <h6 class="mb-0">执行记录</h6>
-                <span id="selectedTaskName" class="text-muted small">请选择任务</span>
+                <div>
+                    <h6 class="mb-0">执行记录</h6>
+                    <span id="selectedTaskName" class="text-muted small">请选择任务</span>
+                </div>
+                <div class="d-flex align-items-center gap-2">
+                    <div class="input-group input-group-sm" style="width: 150px;">
+                        <input type="number" class="form-control" id="refreshIntervalInput"
+                               value="10" min="3" max="300" onchange="updateRefreshInterval()"
+                               placeholder="秒">
+                        <span class="input-group-text">秒</span>
+                    </div>
+                    <button class="btn btn-sm btn-outline-secondary" id="autoRefreshBtn" onclick="toggleAutoRefresh()">
+                        <i class="bi bi-pause"></i> 暂停
+                    </button>
+                    <button class="btn btn-sm btn-outline-primary" onclick="loadExecutions(APP_STATE.selectedTaskId)">
+                        <i class="bi bi-arrow-clockwise"></i> 刷新
+                    </button>
+                </div>
             </div>
             <div class="execution-log" id="executionLog">
                 <div class="empty-state">
@@ -274,7 +290,10 @@ const APP_STATE = {
     currentFilter: 'all',
     selectedTaskId: null,
     runningTasks: new Set(),  // 正在运行的任务ID
-    moduleLoaded: false
+    moduleLoaded: false,
+    refreshInterval: 10,  // 执行记录刷新间隔（秒）
+    autoRefreshEnabled: true,  // 是否自动刷新
+    refreshTimer: null  // 刷新定时器
 };
 
 // ========== API 封装 ==========
@@ -385,6 +404,14 @@ function renderTaskCard(task) {
     const isRunning = APP_STATE.runningTasks.has(task.id);
     const triggerInfo = getTriggerInfo(task);
 
+    // 计算成功率
+    const successRate = task.run_count > 0
+        ? ((task.success_count / task.run_count) * 100).toFixed(0)
+        : '-';
+    const successRateClass = successRate !== '-' && successRate >= 80 ? 'text-success' :
+                              successRate !== '-' && successRate >= 50 ? 'text-warning' :
+                              successRate !== '-' ? 'text-danger' : '';
+
     // 按钮渲染逻辑：
     // - 未启用: 显示编辑、启用、立即执行、删除
     // - 已启用: 显示暂停、立即执行、删除（隐藏编辑）
@@ -400,22 +427,27 @@ function renderTaskCard(task) {
                             '<i class="bi bi-play-circle-fill text-success me-1"></i>' :
                             '<i class="bi bi-pause-circle text-warning me-1"></i>'}
                         ${escapeHtml(task.name)}
+                        ${task.description ? `<small class="text-muted ms-2">- ${escapeHtml(task.description)}</small>` : ''}
                     </div>
                     <div class="task-meta">
-                        <span class="badge bg-secondary">${task.trigger_type}</span>
                         ${triggerInfo}
-                        ${task.next_run_time ? `<span class="ms-2"><i class="bi bi-clock"></i> ${formatTime(task.next_run_time)}</span>` : ''}
+                        ${task.next_run_time ? `<span class="ms-2"><i class="bi bi-clock-fill"></i> 下次: ${formatTime(task.next_run_time)}</span>` : ''}
+                        ${task.script_path ? `<span class="ms-2"><i class="bi bi-file-code"></i> ${escapeHtml(task.script_path.split('/').pop())}</span>` : ''}
                     </div>
-                    <div class="task-stats">
-                        <span class="stat-item stat-total">
+                    <div class="task-stats mt-2">
+                        <span class="stat-item stat-total" title="总运行次数">
                             <i class="bi bi-arrow-repeat"></i> ${task.run_count || 0}
                         </span>
-                        <span class="stat-item stat-success">
+                        <span class="stat-item stat-success" title="成功次数">
                             <i class="bi bi-check-circle"></i> ${task.success_count || 0}
                         </span>
-                        <span class="stat-item stat-failed">
+                        <span class="stat-item stat-failed" title="失败次数">
                             <i class="bi bi-x-circle"></i> ${task.failed_count || 0}
                         </span>
+                        ${task.run_count > 0 ? `
+                        <span class="stat-item ${successRateClass}" title="成功率">
+                            <i class="bi bi-graph-up-arrow"></i> ${successRate}%
+                        </span>` : ''}
                     </div>
                 </div>
                 <div class="task-actions" onclick="event.stopPropagation()">
@@ -445,12 +477,67 @@ function renderTaskCard(task) {
 }
 
 function getTriggerInfo(task) {
-    if (task.trigger_type === 'cron') {
-        return `<code>${escapeHtml(task.cron_expression || '')}</code>`;
-    } else if (task.trigger_type === 'interval') {
-        return `每 ${task.interval_seconds} 秒`;
+    let triggerTypeLabel = '';
+    let triggerContent = '';
+
+    // 触发器类型标签
+    switch (task.trigger_type) {
+        case 'cron':
+            triggerTypeLabel = '<span class="badge bg-primary">定时执行</span>';
+            break;
+        case 'interval':
+            triggerTypeLabel = '<span class="badge bg-info">间隔执行</span>';
+            break;
+        case 'date':
+            triggerTypeLabel = '<span class="badge bg-warning text-dark">单次执行</span>';
+            break;
+        default:
+            triggerTypeLabel = `<span class="badge bg-secondary">${task.trigger_type}</span>`;
     }
-    return '';
+
+    // 触发器详细内容
+    if (task.trigger_type === 'cron' && task.cron_expression) {
+        // 解析 cron 表达式
+        const parts = task.cron_expression.trim().split(/\s+/);
+        if (parts.length >= 6) {
+            const [second, minute, hour, day, month, weekday] = parts;
+            let readable = [];
+            if (second !== '*') readable.push(`第${second}秒`);
+            if (minute !== '*') readable.push(`第${minute}分`);
+            if (hour !== '*') readable.push(`${hour}点`);
+            if (day !== '*') readable.push(`${day}日`);
+            if (month !== '*') readable.push(`${month}月`);
+            if (weekday !== '*') readable.push(`周${weekday}`);
+            triggerContent = readable.join(' ') || '每分钟';
+        } else {
+            triggerContent = task.cron_expression;
+        }
+    } else if (task.trigger_type === 'interval' && task.interval_seconds) {
+        // 格式化间隔时间
+        const seconds = task.interval_seconds;
+        if (seconds >= 86400) {
+            const days = (seconds / 86400).toFixed(1);
+            triggerContent = `每 ${days} 天`;
+        } else if (seconds >= 3600) {
+            const hours = (seconds / 3600).toFixed(1);
+            triggerContent = `每 ${hours} 小时`;
+        } else if (seconds >= 60) {
+            const minutes = (seconds / 60).toFixed(1);
+            triggerContent = `每 ${minutes} 分钟`;
+        } else {
+            triggerContent = `每 ${seconds} 秒`;
+        }
+    } else if (task.trigger_type === 'date' && task.scheduled_time) {
+        triggerContent = new Date(task.scheduled_time).toLocaleString('zh-CN');
+    }
+
+    return `
+        <div class="mt-2">
+            ${triggerTypeLabel}
+            ${triggerContent ? `<code class="ms-1">${escapeHtml(triggerContent)}</code>` : ''}
+            ${task.cron_expression ? `<div class="text-muted small mt-1"><small>Cron: ${escapeHtml(task.cron_expression)}</small></div>` : ''}
+        </div>
+    `;
 }
 
 function updateCounts() {
@@ -487,6 +574,11 @@ async function loadTasks(showLoading = true) {
         if (result.code === 'success') {
             APP_STATE.allTasks = result.data;
             renderTasks();
+
+            // 如果没有选中任务且有任务列表，自动选中第一个
+            if (!APP_STATE.selectedTaskId && result.data.length > 0) {
+                selectTask(result.data[0].id);
+            }
         }
     } catch (e) {
         console.error('加载任务失败:', e);
@@ -721,6 +813,8 @@ async function deleteTask(taskId) {
 }
 
 async function loadExecutions(taskId) {
+    if (!taskId) return;
+
     try {
         const result = await API.getExecutions(taskId, 50);
         const container = document.getElementById('executionLog');
@@ -742,19 +836,40 @@ async function loadExecutions(taskId) {
             container.innerHTML = result.data.map(log => {
                 const statusClass = log.status === 'success' ? 'log-success' :
                                    log.status === 'failed' ? 'log-failed' : 'log-running';
-                const statusIcon = log.status === 'success' ? 'check-circle' :
-                                  log.status === 'failed' ? 'x-circle' : 'arrow-repeat';
+                const statusIcon = log.status === 'success' ? 'check-circle-fill' :
+                                  log.status === 'failed' ? 'x-circle-fill' : 'arrow-repeat';
+
+                // 格式化时间
+                const startTime = log.start_time ? new Date(log.start_time).toLocaleString('zh-CN') : '-';
+                const endTime = log.end_time ? new Date(log.end_time).toLocaleString('zh-CN') : '-';
+
+                // 退出码
+                const exitCode = log.exit_code !== null ? `退出码: ${log.exit_code}` : '';
+
+                // 输出内容（截断）
+                const output = log.output ? escapeHtml(log.output.length > 500 ? log.output.substring(0, 500) + '...' : log.output) : '';
+                const error = log.error ? escapeHtml(log.error.length > 500 ? log.error.substring(0, 500) + '...' : log.error) : '';
+
                 return `
                     <div class="log-entry">
-                        <div>
-                            <span class="log-time">${formatTime(log.start_time)}</span>
-                            <span class="${statusClass}">
-                                <i class="bi bi-${statusIcon}"></i> ${log.status.toUpperCase()}
-                            </span>
-                            ${log.duration ? `<span class="text-muted"> | 耗时 ${log.duration?.toFixed(2)}s</span>` : ''}
+                        <div class="d-flex justify-content-between align-items-start flex-wrap">
+                            <div>
+                                <span class="${statusClass} me-2">
+                                    <i class="bi bi-${statusIcon}"></i> ${log.status.toUpperCase()}
+                                </span>
+                                <span style="color: #4fc3f7;">ID: ${escapeHtml(log.id.substring(0, 8))}...</span>
+                            </div>
+                            <div style="color: #ffb74d;">
+                                ${log.duration !== null && log.duration !== undefined ? `<span class="me-2"><i class="bi bi-stopwatch"></i> ${log.duration.toFixed(2)}s</span>` : ''}
+                                ${exitCode ? `<span class="me-2"><i class="bi bi-terminal"></i> ${exitCode}</span>` : ''}
+                            </div>
                         </div>
-                        ${log.output ? `<div class="text-muted mt-1">${escapeHtml(log.output.substring(0, 200))}</div>` : ''}
-                        ${log.error ? `<div class="text-danger mt-1">${escapeHtml(log.error.substring(0, 200))}</div>` : ''}
+                        <div style="color: #81c784;" class="small mt-1">
+                            <i class="bi bi-calendar-event"></i> 开始: ${startTime}
+                            ${endTime !== '-' ? `<span class="ms-2"><i class="bi bi-calendar-check"></i> 结束: ${endTime}</span>` : ''}
+                        </div>
+                        ${output ? `<div class="mt-2"><small class="text-info">输出:</small><pre class="mb-0 text-light" style="white-space: pre-wrap; word-break: break-all;">${output}</pre></div>` : ''}
+                        ${error ? `<div class="mt-2"><small class="text-danger">错误:</small><pre class="mb-0 text-danger" style="white-space: pre-wrap; word-break: break-all;">${error}</pre></div>` : ''}
                     </div>
                 `;
             }).join('');
@@ -764,14 +879,77 @@ async function loadExecutions(taskId) {
     }
 }
 
+// ========== 自动刷新控制 ==========
+function startAutoRefresh() {
+    stopAutoRefresh(); // 清除之前的定时器
+    APP_STATE.autoRefreshEnabled = true;
+    updateAutoRefreshButton();
+
+    APP_STATE.refreshTimer = setInterval(() => {
+        if (APP_STATE.autoRefreshEnabled && APP_STATE.selectedTaskId) {
+            loadExecutions(APP_STATE.selectedTaskId);
+        }
+    }, APP_STATE.refreshInterval * 1000);
+}
+
+function stopAutoRefresh() {
+    if (APP_STATE.refreshTimer) {
+        clearInterval(APP_STATE.refreshTimer);
+        APP_STATE.refreshTimer = null;
+    }
+    APP_STATE.autoRefreshEnabled = false;
+    updateAutoRefreshButton();
+}
+
+function toggleAutoRefresh() {
+    if (APP_STATE.autoRefreshEnabled) {
+        stopAutoRefresh();
+    } else {
+        startAutoRefresh();
+    }
+}
+
+function updateAutoRefreshButton() {
+    const btn = document.getElementById('autoRefreshBtn');
+    if (APP_STATE.autoRefreshEnabled) {
+        btn.innerHTML = '<i class="bi bi-pause"></i> 暂停';
+        btn.classList.remove('btn-success');
+        btn.classList.add('btn-outline-secondary');
+    } else {
+        btn.innerHTML = '<i class="bi bi-play"></i> 继续';
+        btn.classList.remove('btn-outline-secondary');
+        btn.classList.add('btn-success');
+    }
+}
+
+function updateRefreshInterval() {
+    const input = document.getElementById('refreshIntervalInput');
+    let value = parseInt(input.value);
+
+    // 验证范围
+    if (value < 3) value = 3;
+    if (value > 300) value = 300;
+    input.value = value;
+
+    APP_STATE.refreshInterval = value;
+
+    // 重新启动定时器
+    if (APP_STATE.autoRefreshEnabled) {
+        startAutoRefresh();
+    }
+}
+
 // ========== 初始化 ==========
 document.addEventListener('DOMContentLoaded', function() {
     loadScripts();
     loadTasks();
-    // 定时刷新
+
+    // 启动自动刷新
+    startAutoRefresh();
+
+    // 定时刷新任务列表（30秒）
     setInterval(() => {
         loadTasks(false);
-        if (APP_STATE.selectedTaskId) loadExecutions(APP_STATE.selectedTaskId);
     }, 30000);
 });
 </script>
