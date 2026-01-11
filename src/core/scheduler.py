@@ -20,6 +20,7 @@ from config.database import SessionLocal
 from src.core.task_executor import TaskExecutor
 from src.models.task import Task, TaskStatus, TriggerType
 from src.models.database import TaskModel, TaskExecutionModel
+from src.repository.task_repository import TaskRepository, TaskExecutionRepository
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -50,27 +51,23 @@ def _execute_task_wrapper(task_id: str):
     db = SessionLocal()
 
     try:
-        # 从数据库加载任务
-        task = scheduler.get_task_from_db(task_id)
-        if not task:
+        # 使用 Repository 从数据库加载任务
+        repo = TaskRepository(db)
+        task_model = repo.get_active(task_id)
+        if not task_model:
             logger.error(f"Task not found in database: {task_id}")
             return
+
+        task = task_model.to_domain()
 
         execution_id = scheduler._generate_execution_id(task_id)
         start_time = datetime.now()
         task_executor = get_task_executor()
 
-        # 创建执行记录
-        execution = TaskExecutionModel(
-            id=execution_id,
-            task_id=task.id,
-            task_name=task.name,
-            status=TaskStatus.RUNNING.value,
-            start_time=start_time
-        )
-
-        db.add(execution)
-        db.commit()
+        # 使用 Repository 创建执行记录
+        exec_repo = TaskExecutionRepository(db)
+        execution = exec_repo.create_execution(execution_id, task.id, task.name)
+        execution.status = TaskStatus.RUNNING.value
 
         # 记录任务开始
         scheduler._running_tasks[task.id] = {
@@ -88,30 +85,31 @@ def _execute_task_wrapper(task_id: str):
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
 
-        execution.end_time = end_time
-        execution.duration = duration
-        execution.exit_code = result.get("exit_code")
+        exec_repo.update_execution(
+            execution_id,
+            end_time=end_time,
+            duration=duration,
+            exit_code=result.get("exit_code")
+        )
 
-        # 更新任务运行次数
-        task_model = db.query(TaskModel).filter(TaskModel.id == task_id).first()
-        if task_model:
-            task_model.run_count = (task_model.run_count or 0) + 1
+        # 更新任务统计
+        repo.increment_stats(task_id, success=result.get("success", False))
 
         if result.get("success"):
-            execution.status = TaskStatus.SUCCESS.value
-            execution.output = result.get("stdout", "")
-            if task_model:
-                task_model.success_count = (task_model.success_count or 0) + 1
+            exec_repo.update_execution(
+                execution_id,
+                status=TaskStatus.SUCCESS.value,
+                output=result.get("stdout", "")
+            )
             logger.info(f"Task executed successfully: {task_id}, duration: {duration:.2f}s")
         else:
-            execution.status = TaskStatus.FAILED.value
             error_msg = result.get("error") or result.get("stderr") or "Unknown error"
-            execution.error = error_msg
-            if task_model:
-                task_model.failed_count = (task_model.failed_count or 0) + 1
+            exec_repo.update_execution(
+                execution_id,
+                status=TaskStatus.FAILED.value,
+                error=error_msg
+            )
             logger.error(f"Task execution failed: {task_id}, error: {error_msg}")
-
-        db.commit()
 
     except Exception as e:
         error_detail = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
@@ -123,18 +121,19 @@ def _execute_task_wrapper(task_id: str):
                 end_time = datetime.now()
                 duration = (end_time - start_time).total_seconds() if 'start_time' in locals() else 0
 
-                execution.end_time = end_time
-                execution.duration = duration
-                execution.status = TaskStatus.FAILED.value
-                execution.error = error_detail
+                exec_repo = TaskExecutionRepository(db)
+                exec_repo.update_execution(
+                    execution_id,
+                    end_time=end_time,
+                    duration=duration,
+                    status=TaskStatus.FAILED.value,
+                    error=error_detail
+                )
 
-                # 更新任务运行次数
-                task_model = db.query(TaskModel).filter(TaskModel.id == task_id).first()
-                if task_model:
-                    task_model.run_count = (task_model.run_count or 0) + 1
-                    task_model.failed_count = (task_model.failed_count or 0) + 1
+                # 更新失败统计
+                repo = TaskRepository(db)
+                repo.increment_stats(task_id, success=False)
 
-                db.commit()
         except Exception as db_error:
             logger.error(f"Failed to update execution record: {db_error}")
 
@@ -151,14 +150,14 @@ class TaskScheduler:
         # 配置数据库 JobStore
         jobstores = {
             'default': SQLAlchemyJobStore(
-                url=f"mysql+pymysql://{settings.MYSQL_USER}:{settings.MYSQL_PASSWORD}@{settings.MYSQL_HOST}:{settings.MYSQL_PORT}/{settings.MYSQL_DATABASE}",
+                url=settings.database_url,
                 tablename='apscheduler_jobs'
             )
         }
 
         # 创建调度器实例
         self.scheduler = BackgroundScheduler(
-            timezone=settings.TIMEZONE,
+            timezone=settings.timezone,
             jobstores=jobstores
         )
         self.task_executor = TaskExecutor()
@@ -183,51 +182,82 @@ class TaskScheduler:
         self.scheduler.shutdown(wait=wait)
         logger.info("任务调度器关闭完成")
 
-    def add_task(self, task: Task, save_to_db: bool = True) -> bool:
+    def add_task(self, task: Task, save_to_db: bool = True, force_add: bool = False) -> bool:
         """
         添加任务到调度器
 
         Args:
-            task: 任务对象
+            task: 任务对象（Task 领域模型或 TaskModel）
             save_to_db: 是否保存到数据库
+            force_add: 是否强制添加（即使任务未启用）
 
         Returns:
             bool: 是否添加成功
         """
         import traceback
         try:
-            # 先保存任务配置到数据库（必须在 add_job 之前）
+            # 如果传入的是 TaskModel，转换为 Task 领域模型
+            if isinstance(task, TaskModel):
+                task = task.to_domain()
             if save_to_db:
-                self._save_task_to_db(task)
-                logger.info(f"Task saved to database: {task.id}")
+                # 使用 Repository 保存任务
+                db = SessionLocal()
+                try:
+                    repo = TaskRepository(db)
+                    task_model = TaskModel.from_domain(task)
+
+                    # 检查是否已存在
+                    existing = repo.get(task.id)
+                    if existing:
+                        # 更新现有任务，保留统计信息
+                        task_model.run_count = existing.run_count
+                        task_model.success_count = existing.success_count
+                        task_model.failed_count = existing.failed_count
+                        task_model.deleted = existing.deleted
+                        # 更新字段
+                        for key in ['name', 'script_path', 'trigger_type', 'cron_expression',
+                                   'interval_seconds', 'scheduled_time', 'arguments', 'working_directory',
+                                   'environment', 'timeout', 'enabled', 'description',
+                                   'notification_enabled', 'notification_config']:
+                            setattr(existing, key, getattr(task_model, key))
+                        db.commit()
+                    else:
+                        # 新增任务
+                        task_model.run_count = 0
+                        task_model.success_count = 0
+                        task_model.failed_count = 0
+                        task_model.deleted = False
+                        repo.create(task_model)
+
+                    logger.info(f"Task saved to database: {task.id}")
+                finally:
+                    db.close()
 
             # 如果任务已存在，先移除
             if self.scheduler.get_job(task.id):
                 self.remove_task(task.id, remove_from_db=False)
 
-            # 只有当任务启用时才添加到调度器
-            if task.enabled:
-                # 创建触发器
+            # 只有当任务启用时才添加到调度器（或强制添加）
+            if task.enabled or force_add:
                 trigger = self._create_trigger(task)
                 logger.info(f"Trigger created for task {task.id}: {trigger}")
 
-                # 添加任务到调度器 - 只传递 task_id，避免序列化问题
                 self.scheduler.add_job(
-                    func=_execute_task_wrapper,  # 使用模块级函数
+                    func=_execute_task_wrapper,
                     trigger=trigger,
                     id=task.id,
                     name=task.name,
-                    args=[task.id],  # 只传递 task_id，执行时从数据库重新加载
+                    args=[task.id],
                     max_instances=1,
                     replace_existing=True,
                     misfire_grace_time=300
                 )
 
                 logger.info(f"Task added to scheduler: {task.id} - {task.name}")
-                return True
             else:
                 logger.info(f"Task saved but not added to scheduler (disabled): {task.id} - {task.name}")
-                return True
+
+            return True
 
         except Exception as e:
             logger.error(f"Failed to add task {task.id}: {e}\n{traceback.format_exc()}")
@@ -238,11 +268,6 @@ class TaskScheduler:
         try:
             self.scheduler.remove_job(task_id)
             logger.info(f"Task removed: {task_id}")
-
-            # 从数据库删除任务配置
-            if remove_from_db:
-                self._remove_task_from_db(task_id)
-
             return True
         except Exception as e:
             logger.error(f"Failed to remove task {task_id}: {e}")
@@ -250,36 +275,74 @@ class TaskScheduler:
 
     def pause_task(self, task_id: str) -> bool:
         """暂停任务"""
+        db = SessionLocal()
         try:
-            self.scheduler.pause_job(task_id)
+            repo = TaskRepository(db)
+
+            # 检查任务是否在数据库中存在
+            task = repo.get_active(task_id)
+            if not task:
+                logger.error(f"Task not found in database: {task_id}")
+                return False
+
+            # 尝试暂停调度器中的任务（如果存在）
+            if self.scheduler.get_job(task_id):
+                try:
+                    self.scheduler.pause_job(task_id)
+                    logger.info(f"Job paused in scheduler: {task_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to pause job in scheduler (continuing with DB update): {e}")
+            else:
+                logger.info(f"Job not found in scheduler, only updating DB: {task_id}")
+
+            # 更新数据库状态
+            repo.toggle_status(task_id, enabled=False)
             logger.info(f"Task paused: {task_id}")
             return True
+
         except Exception as e:
             logger.error(f"Failed to pause task {task_id}: {e}")
             return False
+        finally:
+            db.close()
 
     def resume_task(self, task_id: str) -> bool:
         """恢复任务"""
+        db = SessionLocal()
         try:
-            # 检查任务是否已在调度器中
-            if not self.scheduler.get_job(task_id):
-                # 如果任务不在调度器中，从数据库加载并添加
-                task = self.get_task_from_db(task_id)
-                if task:
-                    # 添加任务到调度器
-                    self.add_task(task, save_to_db=False)
-                    logger.info(f"Task added to scheduler on resume: {task_id}")
-                else:
-                    logger.error(f"Task not found in database: {task_id}")
-                    return False
+            repo = TaskRepository(db)
 
-            # 恢复任务执行
-            self.scheduler.resume_job(task_id)
+            # 总是从数据库重新加载任务配置，确保使用最新参数
+            task_model = repo.get_active(task_id)
+            if not task_model:
+                logger.error(f"Task not found in database: {task_id}")
+                return False
+
+            # 转换为领域模型
+            task = task_model.to_domain()
+
+            # 无论任务是否已在调度器中，先移除旧配置
+            try:
+                self.scheduler.remove_job(task_id)
+            except:
+                pass
+
+            # 添加新配置到调度器（这里可能失败）
+            result = self.add_task(task, save_to_db=False, force_add=True)
+            if not result:
+                logger.error(f"Failed to add task to scheduler: {task_id}")
+                return False
+
+            # 只有调度器操作成功后，才更新数据库
+            repo.toggle_status(task_id, enabled=True)
             logger.info(f"Task resumed: {task_id}")
             return True
+
         except Exception as e:
             logger.error(f"Failed to resume task {task_id}: {e}")
             return False
+        finally:
+            db.close()
 
     def get_next_run_time(self, task_id: str) -> Optional[datetime]:
         """获取任务下次执行时间"""
@@ -301,10 +364,9 @@ class TaskScheduler:
         """从数据库获取任务配置"""
         db = SessionLocal()
         try:
-            task_model = db.query(TaskModel).filter(TaskModel.id == task_id).first()
-            if task_model:
-                return self._db_model_to_task(task_model)
-            return None
+            repo = TaskRepository(db)
+            task_model = repo.get_active(task_id)
+            return task_model.to_domain() if task_model else None
         finally:
             db.close()
 
@@ -312,11 +374,9 @@ class TaskScheduler:
         """从数据库获取所有任务"""
         db = SessionLocal()
         try:
-            query = db.query(TaskModel)
-            if not include_deleted:
-                query = query.filter(TaskModel.deleted == False)
-            task_models = query.all()
-            return [self._db_model_to_task(tm) for tm in task_models]
+            repo = TaskRepository(db)
+            task_models = repo.list_with_filter(include_deleted=include_deleted)
+            return [tm.to_domain() for tm in task_models]
         finally:
             db.close()
 
@@ -324,32 +384,71 @@ class TaskScheduler:
         """获取任务执行记录"""
         db = SessionLocal()
         try:
-            executions = db.query(TaskExecutionModel).filter(
-                TaskExecutionModel.task_id == task_id
-            ).order_by(TaskExecutionModel.start_time.desc()).limit(limit).all()
-
-            return [self._execution_to_dict(e) for e in executions]
+            repo = TaskExecutionRepository(db)
+            executions = repo.get_by_task(task_id, limit)
+            return [e.to_dict() for e in executions]
         finally:
             db.close()
 
     def _create_trigger(self, task: Task):
         """根据任务配置创建触发器"""
-        if task.trigger_type == TriggerType.CRON:
-            return CronTrigger.from_crontab(task.cron_expression, timezone=settings.TIMEZONE)
+        # 兼容处理：如果 trigger_type 是字符串，转换为枚举
+        if isinstance(task.trigger_type, str):
+            try:
+                trigger_type = TriggerType(task.trigger_type.strip())
+            except (ValueError, AttributeError) as e:
+                logger.error(f"Invalid trigger_type '{task.trigger_type}': {e}")
+                raise ValueError(f"Unsupported trigger type: {task.trigger_type}")
+        else:
+            trigger_type = task.trigger_type
 
-        elif task.trigger_type == TriggerType.INTERVAL:
+        # 记录触发器类型和关键参数，便于调试
+        logger.info(f"Creating trigger for task {task.id}: type={trigger_type} ({type(trigger_type)}), cron={task.cron_expression}, interval={task.interval_seconds}, scheduled={task.scheduled_time}")
+
+        if trigger_type == TriggerType.CRON:
+            if not task.cron_expression:
+                raise ValueError(f"cron_expression is required for cron trigger, got: {task.cron_expression}")
+
+            cron_expr = task.cron_expression.strip()
+            fields = cron_expr.split()
+
+            # 处理不同格式的 cron 表达式
+            # 5 字段: 分 时 日 月 周 (标准 Unix cron)
+            # 6 字段: 秒 分 时 日 月 周 (包含秒)
+            if len(fields) == 6:
+                # 6 字段格式，使用 CronTrigger 构造函数
+                return CronTrigger(
+                    second=fields[0],
+                    minute=fields[1],
+                    hour=fields[2],
+                    day=fields[3],
+                    month=fields[4],
+                    day_of_week=fields[5],
+                    timezone=settings.timezone
+                )
+            elif len(fields) == 5:
+                # 5 字段标准格式，使用 from_crontab
+                return CronTrigger.from_crontab(cron_expr, timezone=settings.timezone)
+            else:
+                raise ValueError(f"Invalid cron expression '{cron_expr}': expected 5 or 6 fields, got {len(fields)}")
+
+        elif trigger_type == TriggerType.INTERVAL:
+            if not task.interval_seconds or task.interval_seconds <= 0:
+                raise ValueError(f"interval_seconds must be positive for interval trigger, got: {task.interval_seconds}")
             return IntervalTrigger(
                 seconds=task.interval_seconds,
-                timezone=settings.TIMEZONE
+                timezone=settings.timezone
             )
 
-        elif task.trigger_type == TriggerType.DATE:
+        elif trigger_type == TriggerType.DATE:
+            if not task.scheduled_time:
+                raise ValueError(f"scheduled_time is required for date trigger, got: {task.scheduled_time}")
             return DateTrigger(
                 run_date=task.scheduled_time,
-                timezone=settings.TIMEZONE
+                timezone=settings.timezone
             )
 
-        raise ValueError(f"Unsupported trigger type: {task.trigger_type}")
+        raise ValueError(f"Unsupported trigger type: {trigger_type} (type: {type(trigger_type)}, expected TriggerType enum)")
 
     def _on_job_executed(self, event):
         """APScheduler 事件回调"""
@@ -361,90 +460,25 @@ class TaskScheduler:
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")[:17]
         return f"{task_id}_{timestamp}"
 
-    def _save_task_to_db(self, task: Task):
-        """保存任务配置到数据库"""
-        db = SessionLocal()
-        try:
-            # 检查是否已存在
-            existing = db.query(TaskModel).filter(TaskModel.id == task.id).first()
-
-            task_data = {
-                "id": task.id,
-                "name": task.name,
-                "script_path": task.script_path,
-                "trigger_type": task.trigger_type.value,
-                "cron_expression": task.cron_expression,
-                "interval_seconds": task.interval_seconds,
-                "scheduled_time": task.scheduled_time,
-                "arguments": json.dumps(task.arguments) if task.arguments else None,
-                "working_directory": task.working_directory,
-                "environment": json.dumps(task.environment) if task.environment else None,
-                "timeout": task.timeout,
-                "enabled": task.enabled,
-                "description": task.description,
-                "notification_enabled": task.notification.enabled if task.notification else False,
-                "notification_config": json.dumps({
-                    "channels": [c.value for c in task.notification.channels],
-                    "on_success": task.notification.on_success,
-                    "on_failure": task.notification.on_failure,
-                    "config": task.notification.config
-                }) if task.notification else None
-            }
-
-            if existing:
-                # 更新 - 不覆盖 deleted 和 run_count
-                for key, value in task_data.items():
-                    setattr(existing, key, value)
-            else:
-                # 新增 - 添加 deleted=False
-                task_data["deleted"] = False
-                task_data["run_count"] = 0
-                task_data["success_count"] = 0
-                task_data["failed_count"] = 0
-                db_task = TaskModel(**task_data)
-                db.add(db_task)
-
-            db.commit()
-        except Exception as e:
-            logger.error(f"Failed to save task to db: {e}")
-            db.rollback()
-        finally:
-            db.close()
-
-    def _remove_task_from_db(self, task_id: str):
-        """从数据库删除任务配置"""
-        db = SessionLocal()
-        try:
-            db.query(TaskModel).filter(TaskModel.id == task_id).delete()
-            db.commit()
-        except Exception as e:
-            logger.error(f"Failed to remove task from db: {e}")
-            db.rollback()
-        finally:
-            db.close()
-
     def _load_tasks_from_db(self):
         """从数据库加载任务并添加到调度器"""
         db = SessionLocal()
         try:
-            # 只加载未删除且已启用的任务
-            task_models = db.query(TaskModel).filter(
-                TaskModel.enabled == True,
-                TaskModel.deleted == False
-            ).all()
+            repo = TaskRepository(db)
+            task_models = repo.list_active()
+
             for task_model in task_models:
-                task = self._db_model_to_task(task_model)
+                task = task_model.to_domain()
                 if task:
-                    # 添加到调度器但不重复保存到数据库
                     try:
                         if not self.scheduler.get_job(task.id):
                             trigger = self._create_trigger(task)
                             self.scheduler.add_job(
-                                func=_execute_task_wrapper,  # 使用模块级函数
+                                func=_execute_task_wrapper,
                                 trigger=trigger,
                                 id=task.id,
                                 name=task.name,
-                                args=[task.id],  # 只传递 task_id
+                                args=[task.id],
                                 max_instances=1,
                                 replace_existing=False
                             )
@@ -453,58 +487,6 @@ class TaskScheduler:
                         logger.error(f"Failed to load task {task.id}: {e}")
         finally:
             db.close()
-
-    def _db_model_to_task(self, task_model: TaskModel) -> Optional[Task]:
-        """数据库模型转换为 Task 对象"""
-        try:
-            from src.models.task import TriggerType, NotificationConfig, NotificationChannel
-
-            # 解析通知配置
-            notification = None
-            if task_model.notification_enabled and task_model.notification_config:
-                notif_config = json.loads(task_model.notification_config)
-                notification = NotificationConfig(
-                    enabled=True,
-                    channels=[NotificationChannel(c) for c in notif_config.get("channels", [])],
-                    on_success=notif_config.get("on_success", False),
-                    on_failure=notif_config.get("on_failure", True),
-                    config=notif_config.get("config", {})
-                )
-
-            return Task(
-                id=task_model.id,
-                name=task_model.name,
-                script_path=task_model.script_path,
-                trigger_type=TriggerType(task_model.trigger_type),
-                cron_expression=task_model.cron_expression,
-                interval_seconds=task_model.interval_seconds,
-                scheduled_time=task_model.scheduled_time,
-                arguments=json.loads(task_model.arguments) if task_model.arguments else [],
-                working_directory=task_model.working_directory,
-                environment=json.loads(task_model.environment) if task_model.environment else {},
-                timeout=task_model.timeout,
-                enabled=task_model.enabled,
-                description=task_model.description,
-                notification=notification
-            )
-        except Exception as e:
-            logger.error(f"Failed to convert db model to task: {e}")
-            return None
-
-    def _execution_to_dict(self, execution: TaskExecutionModel) -> Dict[str, Any]:
-        """执行记录转换为字典"""
-        return {
-            "id": execution.id,
-            "task_id": execution.task_id,
-            "task_name": execution.task_name,
-            "status": execution.status,
-            "start_time": execution.start_time.isoformat() if execution.start_time else None,
-            "end_time": execution.end_time.isoformat() if execution.end_time else None,
-            "duration": execution.duration,
-            "exit_code": execution.exit_code,
-            "output": execution.output,
-            "error": execution.error
-        }
 
 
 # 全局调度器实例

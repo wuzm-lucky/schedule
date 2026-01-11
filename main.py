@@ -22,12 +22,12 @@ def main():
     settings = get_settings()
     # 设置日志
     setup_logger(
-        level=settings.LOG_LEVEL,
-        log_dir=settings.LOGS_DIR
+        level=settings.log_level,
+        log_dir=str(settings.logs_path)
     )
     logger = logging.getLogger(__name__)
 
-    logger.info(f"⭐⭐⭐⭐⭐⭐{settings.APP_NAME} v{settings.APP_VERSION} 开始启动⭐⭐⭐⭐⭐⭐")
+    logger.info(f"⭐⭐⭐⭐⭐⭐{settings.app_name} v{settings.app_version} 开始启动⭐⭐⭐⭐⭐⭐")
 
     # 创建应用
     app = create_app()
@@ -35,9 +35,9 @@ def main():
     # 启动服务
     uvicorn.run(
         app,
-        host=settings.API_HOST,
-        port=settings.API_PORT,
-        log_level=settings.LOG_LEVEL.lower(),
+        host=settings.api_host,
+        port=settings.api_port,
+        log_level=settings.log_level.lower(),
         access_log=True
     )
 

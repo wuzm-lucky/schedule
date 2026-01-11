@@ -11,15 +11,60 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Callable
+from dataclasses import dataclass
 
+from config import get_settings
 from src.models.task import Task
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
+
+
+@dataclass
+class CommandBuilder:
+    """命令构建器"""
+    extensions: List[str]
+    command: List[str]
+    check_executable: Optional[Callable[[str], bool]] = None
+
+    def build(self, script_path: str, arguments: List[str]) -> List[str]:
+        """构建命令"""
+        if self.check_executable:
+            if not self.check_executable(self.command[0]):
+                raise RuntimeError(f"Executable not found: {self.command[0]}")
+        return self.command + [script_path] + arguments
 
 
 class TaskExecutor:
     """任务执行器 - 使用 subprocess 进程隔离执行脚本"""
+
+    # 支持的脚本类型命令构建器
+    COMMAND_BUILDERS: List[CommandBuilder] = [
+        CommandBuilder(['.py'], [sys.executable]),
+        CommandBuilder(['.sh'], ['/bin/bash']),
+        CommandBuilder(['.bash'], ['/bin/bash']),
+        CommandBuilder(['.bat', '.cmd'], ['cmd.exe', '/c']),
+        CommandBuilder(['.js'], ['node']),
+        CommandBuilder(['.ts'], ['npx', 'ts-node']),
+        CommandBuilder(['.ps1'], ['pwsh', '-File'], lambda x: self._check_pwsh(x)),
+        CommandBuilder(['.rb'], ['ruby']),
+        CommandBuilder(['.php'], ['php']),
+        CommandBuilder(['.pl'], ['perl']),
+    ]
+
+    @staticmethod
+    def _check_pwsh(executable: str) -> bool:
+        """检查 PowerShell 是否可用"""
+        try:
+            result = subprocess.run(
+                [executable, '-Version'],
+                capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
 
     def __init__(self):
         self._running_processes: Dict[str, subprocess.Popen] = {}
@@ -48,11 +93,9 @@ class TaskExecutor:
         logger.info(f"Executing task: {task.id}, script: {script_path}, execution_id: {execution_id}")
 
         try:
-            # 构建执行命令
             cmd = self._build_command(task, script_path)
             logger.info(f"Command: {' '.join(cmd)}")
 
-            # 执行脚本 - 使用更稳定的参数
             result = subprocess.run(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -65,45 +108,31 @@ class TaskExecutor:
 
             duration = (datetime.now() - start_time).total_seconds()
 
-            # 手动解码输出，处理编码错误
-            try:
-                stdout = result.stdout.decode('utf-8')
-            except UnicodeDecodeError:
-                stdout = result.stdout.decode('gbk', errors='replace')
-
-            try:
-                stderr = result.stderr.decode('utf-8')
-            except UnicodeDecodeError:
-                stderr = result.stderr.decode('gbk', errors='replace')
-
             return {
                 "success": result.returncode == 0,
                 "exit_code": result.returncode,
-                "stdout": stdout,
-                "stderr": stderr,
+                "stdout": self._decode_output(result.stdout),
+                "stderr": self._decode_output(result.stderr),
                 "duration": duration
             }
 
         except subprocess.TimeoutExpired as e:
             logger.error(f"Task timeout: {task.id}")
-            # 尝试获取已产生的输出
-            stdout = stderr = ""
-            if e.stdout:
-                try:
-                    stdout = e.stdout.decode('utf-8', errors='replace')
-                except:
-                    pass
-            if e.stderr:
-                try:
-                    stderr = e.stderr.decode('utf-8', errors='replace')
-                except:
-                    pass
             return {
                 "success": False,
                 "error": f"Task execution timeout after {task.timeout} seconds",
                 "exit_code": -1,
-                "stdout": stdout,
-                "stderr": stderr
+                "stdout": self._decode_output(getattr(e, 'stdout', b'')),
+                "stderr": self._decode_output(getattr(e, 'stderr', b''))
+            }
+
+        except FileNotFoundError as e:
+            error_detail = f"Executable not found: {e.filename}"
+            logger.error(f"Task execution error: {task.id} - {error_detail}")
+            return {
+                "success": False,
+                "error": error_detail,
+                "exit_code": -1
             }
 
         except Exception as e:
@@ -117,7 +146,7 @@ class TaskExecutor:
             }
 
     def execute_async(self, task: Task, execution_id: str,
-                      callback: Optional[callable] = None) -> str:
+                      callback: Optional[Callable] = None) -> str:
         """
         异步执行任务（带实时日志流）
 
@@ -135,10 +164,6 @@ class TaskExecutor:
 
         cmd = self._build_command(task, script_path)
 
-        # 创建日志队列
-        log_queue = queue.Queue()
-
-        # 启动进程
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -146,15 +171,13 @@ class TaskExecutor:
             text=True,
             cwd=task.working_directory or os.path.dirname(script_path),
             env=self._build_env(task.environment),
-            bufsize=1  # 行缓冲
+            bufsize=1
         )
 
         self._running_processes[execution_id] = process
 
-        # 等待进程完成的线程
         def wait_for_completion():
             process.wait()
-
             self._running_processes.pop(execution_id, None)
 
             result = {
@@ -177,7 +200,6 @@ class TaskExecutor:
         if process:
             try:
                 process.terminate()
-                # 等待最多5秒
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
@@ -193,19 +215,24 @@ class TaskExecutor:
         return list(self._running_processes.keys())
 
     def _resolve_script_path(self, script_path: str) -> Optional[str]:
-        """解析脚本路径"""
-        # 支持绝对路径和相对路径
+        """
+        解析脚本路径
+
+        优先级:
+        1. 绝对路径
+        2. scripts 目录相对路径
+        3. 当前工作目录相对路径
+        """
+        # 绝对路径
         if os.path.isabs(script_path):
             return script_path if os.path.exists(script_path) else None
 
-        # 尝试在 scripts 目录查找
-        scripts_dir = Path(__file__).parent.parent.parent / "scripts"
-        absolute_path = scripts_dir / script_path
+        # scripts 目录
+        scripts_path = settings.scripts_path / script_path
+        if scripts_path.exists():
+            return str(scripts_path)
 
-        if absolute_path.exists():
-            return str(absolute_path)
-
-        # 尝试相对于工作目录
+        # 当前工作目录
         cwd_path = Path.cwd() / script_path
         if cwd_path.exists():
             return str(cwd_path)
@@ -216,21 +243,14 @@ class TaskExecutor:
         """构建执行命令"""
         ext = os.path.splitext(script_path)[1].lower()
 
-        if ext == '.py':
-            return [sys.executable, script_path] + task.arguments
+        # 查找匹配的命令构建器
+        for builder in self.COMMAND_BUILDERS:
+            if ext in builder.extensions:
+                return builder.build(script_path, task.arguments)
 
-        elif ext == '.sh':
-            return ['/bin/bash', script_path] + task.arguments
-
-        elif ext == '.bat' or ext == '.cmd':
-            return ['cmd.exe', '/c', script_path] + task.arguments
-
-        elif ext == '.js':
-            return ['node', script_path] + task.arguments
-
-        else:
-            # 尝试直接执行（需要可执行权限）
-            return [script_path] + task.arguments
+        # 默认直接执行
+        logger.warning(f"Unknown script type: {ext}, executing directly")
+        return [script_path] + task.arguments
 
     def _build_env(self, task_env: Optional[Dict[str, str]]) -> Dict[str, str]:
         """构建环境变量"""
@@ -238,3 +258,22 @@ class TaskExecutor:
         if task_env:
             env.update(task_env)
         return env
+
+    def _decode_output(self, output: bytes) -> str:
+        """
+        解码输出，支持多种编码
+
+        尝试顺序: utf-8 -> gbk -> 系统默认 -> 替换模式
+        """
+        if not output:
+            return ""
+
+        encodings = ['utf-8', 'gbk', sys.getdefaultencoding()]
+        for encoding in encodings:
+            try:
+                return output.decode(encoding)
+            except (UnicodeDecodeError, LookupError):
+                continue
+
+        # 最后使用替换模式
+        return output.decode('utf-8', errors='replace')

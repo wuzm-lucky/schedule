@@ -3,7 +3,9 @@ SQLAlchemy ORM 模型定义
 用于数据库持久化操作
 """
 
+import json
 from datetime import datetime
+from typing import Optional, Dict, Any
 from sqlalchemy import Column, String, Integer, Text, Boolean, DateTime, Float, Index
 from sqlalchemy.orm import relationship
 from config.database import Base
@@ -42,6 +44,102 @@ class TaskModel(Base):
         {'comment': '任务配置表'}
     )
 
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典"""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "script_path": self.script_path,
+            "trigger_type": self.trigger_type,
+            "enabled": self.enabled,
+            "deleted": self.deleted,
+            "run_count": self.run_count,
+            "success_count": self.success_count,
+            "failed_count": self.failed_count,
+            "description": self.description,
+            "cron_expression": self.cron_expression,
+            "interval_seconds": self.interval_seconds,
+            "arguments": json.loads(self.arguments) if self.arguments else [],
+            "working_directory": self.working_directory,
+            "timeout": self.timeout,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None
+        }
+
+    def to_domain(self):
+        """转换为领域模型"""
+        from src.models.task import Task, TriggerType, NotificationConfig, NotificationChannel
+
+        # 安全地转换 trigger_type
+        try:
+            trigger_type_value = self.trigger_type.strip() if self.trigger_type else self.trigger_type
+            trigger_type = TriggerType(trigger_type_value)
+        except (ValueError, AttributeError) as e:
+            # 如果转换失败，尝试通过值查找
+            for t in TriggerType:
+                if t.value == self.trigger_type:
+                    trigger_type = t
+                    break
+            else:
+                # 如果还是找不到，使用默认值
+                import logging
+                logging.error(f"Invalid trigger_type '{self.trigger_type}' for task {self.id}, defaulting to INTERVAL")
+                trigger_type = TriggerType.INTERVAL
+
+        notification = None
+        if self.notification_enabled and self.notification_config:
+            notif_config = json.loads(self.notification_config)
+            notification = NotificationConfig(
+                enabled=True,
+                channels=[NotificationChannel(c) for c in notif_config.get("channels", [])],
+                on_success=notif_config.get("on_success", False),
+                on_failure=notif_config.get("on_failure", True),
+                config=notif_config.get("config", {})
+            )
+
+        return Task(
+            id=self.id,
+            name=self.name,
+            script_path=self.script_path,
+            trigger_type=trigger_type,
+            cron_expression=self.cron_expression,
+            interval_seconds=self.interval_seconds,
+            scheduled_time=self.scheduled_time,
+            arguments=json.loads(self.arguments) if self.arguments else [],
+            working_directory=self.working_directory,
+            environment=json.loads(self.environment) if self.environment else {},
+            timeout=self.timeout,
+            enabled=self.enabled,
+            description=self.description,
+            notification=notification
+        )
+
+    @classmethod
+    def from_domain(cls, task) -> 'TaskModel':
+        """从领域模型创建"""
+        return cls(
+            id=task.id,
+            name=task.name,
+            script_path=task.script_path,
+            trigger_type=task.trigger_type.value,
+            cron_expression=task.cron_expression,
+            interval_seconds=task.interval_seconds,
+            scheduled_time=task.scheduled_time,
+            arguments=json.dumps(task.arguments) if task.arguments else None,
+            working_directory=task.working_directory,
+            environment=json.dumps(task.environment) if task.environment else None,
+            timeout=task.timeout,
+            enabled=task.enabled,
+            description=task.description,
+            notification_enabled=task.notification.enabled if task.notification else False,
+            notification_config=json.dumps({
+                "channels": [c.value for c in task.notification.channels],
+                "on_success": task.notification.on_success,
+                "on_failure": task.notification.on_failure,
+                "config": task.notification.config
+            }) if task.notification else None
+        )
+
 
 class TaskExecutionModel(Base):
     """任务执行记录表模型"""
@@ -65,3 +163,18 @@ class TaskExecutionModel(Base):
         Index('idx_start_time', 'start_time'),
         {'comment': '任务执行记录表'}
     )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典"""
+        return {
+            "id": self.id,
+            "task_id": self.task_id,
+            "task_name": self.task_name,
+            "status": self.status,
+            "start_time": self.start_time.isoformat() if self.start_time else None,
+            "end_time": self.end_time.isoformat() if self.end_time else None,
+            "duration": self.duration,
+            "exit_code": self.exit_code,
+            "output": self.output,
+            "error": self.error
+        }

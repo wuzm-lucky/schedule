@@ -10,11 +10,9 @@ from config import get_settings
 
 settings = get_settings()
 
-# 创建引擎
-DATABASE_URI = f"mysql+pymysql://{settings.MYSQL_USER}:{settings.MYSQL_PASSWORD}@{settings.MYSQL_HOST}:{settings.MYSQL_PORT}/{settings.MYSQL_DATABASE}"
-print(DATABASE_URI)
+# 创建引擎 - 使用新的 database_url 属性
 engine = create_engine(
-    DATABASE_URI,
+    settings.database_url,
     pool_pre_ping=True,
     echo=False
 )

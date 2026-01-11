@@ -4,16 +4,20 @@ FastAPI 应用主入口
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from config import get_settings
 from src.api import tasks, health
 from src.core.scheduler import get_scheduler
-from config.database import engine,Base
+from src.middleware import register_exception_handlers
+from config.database import engine, Base
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -28,36 +32,36 @@ async def lifespan(app: FastAPI):
     # 启动调度器
     scheduler = get_scheduler()
     scheduler.start()
-    logger.info(f"⭐⭐⭐⭐⭐⭐{settings.APP_NAME} 启动完成⭐⭐⭐⭐⭐⭐")
+    logger.info(f"⭐⭐⭐⭐⭐⭐{settings.app_name} 启动完成⭐⭐⭐⭐⭐⭐")
 
     yield
 
     # 关闭时
     logger.info("任务调度器关闭中...")
     scheduler.shutdown()
-    logger.info(f"⭐⭐⭐⭐⭐⭐{settings.APP_NAME} 已停止⭐⭐⭐⭐⭐⭐\n\n\n")
+    logger.info(f"⭐⭐⭐⭐⭐⭐{settings.app_name} 已停止⭐⭐⭐⭐⭐⭐\n\n\n")
+
 
 def create_app() -> FastAPI:
     """创建 FastAPI 应用"""
     app = FastAPI(
-        title=settings.APP_NAME,
-        version=settings.APP_VERSION,
-        description=settings.APP_DESCRIPTION,
+        title=settings.app_name,
+        version=settings.app_version,
+        description=settings.app_description,
         lifespan=lifespan
     )
 
+    # 注册异常处理器
+    register_exception_handlers(app)
+
+    # 注册静态文件目录
+    static_dir = Path(__file__).parent.parent / "static"
+    if static_dir.exists():
+        app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+        logger.info(f"静态文件目录已挂载: {static_dir}")
+
     # 注册路由
     app.include_router(health.router, tags=["Health"])
-    app.include_router(tasks.router, prefix=settings.API_PREFIX, tags=["Tasks"])
-
-    # 全局异常处理
-    @app.exception_handler(Exception)
-    async def global_exception_handler(request, exc):
-        logger.error(f"Unhandled exception: {exc}")
-        from fastapi.responses import JSONResponse
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(exc), "detail": "Internal server error"}
-        )
+    app.include_router(tasks.router, prefix=settings.api_prefix, tags=["Tasks"])
 
     return app
