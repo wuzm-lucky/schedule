@@ -55,6 +55,18 @@ class Settings(BaseSettings):
         root_path = Path(__file__).parent.parent
         return root_path / self.scripts_dir
 
+    # ========== 脚本日志目录配置 ==========
+    script_logs_dir: str = Field(default="script_logs", alias="SCRIPT_LOGS_DIR")
+
+    @property
+    def script_logs_path(self) -> Path:
+        """获取脚本日志目录绝对路径"""
+        root_path = Path(__file__).parent.parent
+        logs_path = root_path / self.script_logs_dir
+        # 确保日志目录存在
+        logs_path.mkdir(parents=True, exist_ok=True)
+        return logs_path
+
     # ========== MySQL 配置 ==========
     mysql_host: str = Field(default="localhost", alias="MYSQL_HOST")
     mysql_port: int = Field(default=3306, alias="MYSQL_PORT")

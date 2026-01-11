@@ -5,11 +5,13 @@
 """
 
 import sys
+import logging
 from datetime import datetime
-
 
 def main():
     """主函数"""
+    logger = logging.getLogger(__name__)
+    logger.info(f"※※※※※这是{__name__}脚本※※※※※")
     print(f"[{datetime.now()}] Hello, Task Worker!")
     print("This is a test task.")
     print("Arguments received:", sys.argv[1:])

@@ -69,6 +69,23 @@ class TaskExecutor:
     def __init__(self):
         self._running_processes: Dict[str, subprocess.Popen] = {}
 
+    def _get_script_log_file(self, script_path: str) -> Path:
+        """
+        获取脚本对应的日志文件路径
+
+        日志文件名为脚本名（去掉扩展名）+ .log
+        例如: test.py -> test.log
+
+        Args:
+            script_path: 脚本文件路径
+
+        Returns:
+            日志文件路径
+        """
+        script_name = Path(script_path).stem  # 获取不带扩展名的文件名
+        log_file = settings.script_logs_path / f"{script_name}.log"
+        return log_file
+
     def execute(self, task: Task, execution_id: str) -> Dict[str, Any]:
         """
         执行任务
@@ -92,9 +109,34 @@ class TaskExecutor:
 
         logger.info(f"Executing task: {task.id}, script: {script_path}, execution_id: {execution_id}")
 
+        # 获取脚本日志文件
+        log_file = self._get_script_log_file(script_path)
+        log_handle = None
+
         try:
             cmd = self._build_command(task, script_path)
             logger.info(f"Command: {' '.join(cmd)}")
+
+            # 构建环境变量，添加日志文件路径
+            env = self._build_env(task.environment)
+            env["TASK_SCRIPT_LOG"] = str(log_file)
+            env["TASK_EXECUTION_ID"] = execution_id
+            env["TASK_ID"] = task.id
+
+            # 打开日志文件用于追加输出（二进制模式，便于编码转换）
+            log_handle = open(log_file, 'ab')
+
+            # 写入执行开始标记（UTF-8编码）
+            header = f"\n{'='*80}\n"
+            header += f"[{start_time.strftime('%Y-%m-%d %H:%M:%S')}] 执行开始\n"
+            header += f"任务ID: {task.id}\n"
+            header += f"任务名称: {task.name}\n"
+            header += f"执行ID: {execution_id}\n"
+            header += f"脚本: {script_path}\n"
+            header += f"参数: {' '.join(task.arguments) if task.arguments else '无'}\n"
+            header += f"{'='*80}\n"
+            log_handle.write(header.encode('utf-8'))
+            log_handle.flush()
 
             result = subprocess.run(
                 cmd,
@@ -102,16 +144,43 @@ class TaskExecutor:
                 stderr=subprocess.PIPE,
                 timeout=task.timeout,
                 cwd=task.working_directory or os.path.dirname(script_path),
-                env=self._build_env(task.environment),
+                env=env,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
 
             duration = (datetime.now() - start_time).total_seconds()
 
+            # 写入执行结果到日志文件
+            end_time = datetime.now()
+            footer = f"\n{'-'*80}\n"
+            footer += f"执行结果: {'成功' if result.returncode == 0 else '失败'}\n"
+            footer += f"退出码: {result.returncode}\n"
+            footer += f"耗时: {duration:.2f}秒\n"
+            footer += f"结束时间: {end_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            log_handle.write(footer.encode('utf-8'))
+
+            # 写入标准输出（转换为UTF-8字节）
+            if result.stdout:
+                log_handle.write("\n[标准输出]\n".encode('utf-8'))
+                log_handle.write(self._convert_to_utf8_bytes(result.stdout))
+                if result.stdout and result.stdout[-1:] != b'\n':
+                    log_handle.write('\n'.encode('utf-8'))
+
+            # 写入标准错误（转换为UTF-8字节）
+            if result.stderr:
+                log_handle.write("\n[标准错误]\n".encode('utf-8'))
+                log_handle.write(self._convert_to_utf8_bytes(result.stderr))
+                if result.stderr and result.stderr[-1:] != b'\n':
+                    log_handle.write('\n'.encode('utf-8'))
+
+            log_handle.write(f"{'='*80}\n".encode('utf-8'))
+            log_handle.close()
+            log_handle = None
+
             return {
                 "success": result.returncode == 0,
                 "exit_code": result.returncode,
-                "stdout": self._decode_output(result.stdout),
+                "stdout": self._decode_output(result.stdout),  # API返回原始解码
                 "stderr": self._decode_output(result.stderr),
                 "duration": duration
             }
@@ -144,6 +213,46 @@ class TaskExecutor:
                 "error": error_detail,
                 "exit_code": -1
             }
+
+        finally:
+            # 确保日志文件被关闭
+            if log_handle and not log_handle.closed:
+                try:
+                    log_handle.close()
+                except Exception:
+                    pass
+
+    def _log_error_to_file(self, log_handle, error_message: str, exception: Exception, start_time: datetime):
+        """记录错误到日志文件"""
+        if not log_handle or log_handle.closed:
+            return
+
+        try:
+            duration = (datetime.now() - start_time).total_seconds()
+            error_footer = f"\n{'-'*80}\n"
+            error_footer += f"执行结果: 失败\n"
+            error_footer += f"错误: {error_message}\n"
+            error_footer += f"耗时: {duration:.2f}秒\n"
+            error_footer += f"结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            log_handle.write(error_footer.encode('utf-8'))
+
+            # 如果有输出，也记录（转换为UTF-8字节）
+            if hasattr(exception, 'stdout') and exception.stdout:
+                stdout_bytes = exception.stdout if isinstance(exception.stdout, bytes) else str(exception.stdout).encode('utf-8')
+                log_handle.write("\n[标准输出]\n".encode('utf-8'))
+                log_handle.write(self._convert_to_utf8_bytes(stdout_bytes))
+                log_handle.write('\n'.encode('utf-8'))
+
+            if hasattr(exception, 'stderr') and exception.stderr:
+                stderr_bytes = exception.stderr if isinstance(exception.stderr, bytes) else str(exception.stderr).encode('utf-8')
+                log_handle.write("\n[标准错误]\n".encode('utf-8'))
+                log_handle.write(self._convert_to_utf8_bytes(stderr_bytes))
+                log_handle.write('\n'.encode('utf-8'))
+
+            log_handle.write(f"{'='*80}\n".encode('utf-8'))
+            log_handle.flush()
+        except Exception:
+            pass
 
     def execute_async(self, task: Task, execution_id: str,
                       callback: Optional[Callable] = None) -> str:
@@ -277,3 +386,52 @@ class TaskExecutor:
 
         # 最后使用替换模式
         return output.decode('utf-8', errors='replace')
+
+    def _convert_to_utf8_bytes(self, output: bytes) -> bytes:
+        """
+        将原始字节转换为UTF-8字节
+
+        假设脚本已经配置为UTF-8输出，但仍做兼容性检测
+        """
+        if not output:
+            return b""
+
+        # 尝试使用 chardet 检测编码
+        try:
+            import chardet
+            detection = chardet.detect(output)
+            detected_encoding = detection.get('encoding', 'utf-8')
+            confidence = detection.get('confidence', 0)
+
+            # 如果检测到的不是UTF-8，需要转换
+            if detected_encoding.lower() not in ['utf-8', 'ascii']:
+                try:
+                    text = output.decode(detected_encoding)
+                    return text.encode('utf-8')
+                except:
+                    pass
+        except ImportError:
+            pass
+
+        # 尝试UTF-8解码（直接返回）
+        try:
+            output.decode('utf-8')
+            return output
+        except UnicodeDecodeError:
+            pass
+
+        # 回退到GBK（Windows中文）
+        try:
+            text = output.decode('gbk')
+            return text.encode('utf-8')
+        except:
+            pass
+
+        # 最后尝试系统默认编码
+        try:
+            text = output.decode(sys.getdefaultencoding())
+            return text.encode('utf-8')
+        except:
+            # 强制UTF-8替换模式
+            text = output.decode('utf-8', errors='replace')
+            return text.encode('utf-8')
